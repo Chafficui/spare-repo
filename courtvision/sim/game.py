@@ -41,6 +41,10 @@ def default_zones() -> dict[str, list[tuple[float, float]]]:
     }
 
 
+#: Maximale Haltezeit des Empfängers bis zum Wurf für einen Assist (s).
+ASSIST_MAX_HOLD_S = 2.0
+
+
 @dataclass
 class SimNoise:
     """Degradationen des Beobachtungsstroms (Default: kein Rauschen)."""
@@ -888,7 +892,10 @@ class _Sim:
             pm = (0.58 if rim else 0.40) + sk["p2"]
         made = (not blocked) and rng.random() < pm
         and1 = made and rng.random() < 0.045
-        assisted = made and assister is not None and rng.random() < 0.72
+        # Assist-Wahrheit wie beim Statistiker: Pass und Abschluss ohne lange
+        # Eigenaktion (Ballhalten <= ASSIST_MAX_HOLD_S). Beobachtbar über die
+        # Ballbesitzkette, deshalb nicht zufällig.
+        assisted = made and assister is not None and hold <= ASSIST_MAX_HOLD_S
         flight = rng.uniform(0.6, 1.0)
         blocker = self._pick(de) if blocked else None
         fouler = self._pick(de, key="foul") if and1 else None

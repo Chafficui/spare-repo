@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verband – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <h1>Verband / Liga</h1>
+  <section class="card">
+    <div class="row">
+      <div><label for="league">Liga</label><select id="league"></select></div>
+      <div><label for="metric">Kennzahl</label>
+        <select id="metric">
+          <option value="average_grade">Ø Note</option><option value="scoring">Scoring</option><option value="efficiency">Effizienz</option>
+          <option value="rebounding">Rebounding</option><option value="playmaking">Playmaking</option><option value="defense">Defense</option>
+          <option value="ball_security">Ballsicherheit</option><option value="pts">Best Punkte</option><option value="reb">Best Rebounds</option><option value="ast">Best Assists</option>
+        </select></div>
+      <div class="fit"><button id="csv" class="primary">CSV-Export</button></div>
+    </div>
+    <p class="muted small">Bestenliste nur aus freigegebenen Spielen. Minderjährige und Spieler ohne öffentliche Freigabe werden nie gelistet; der CSV-Export weist sie nur in der Team-Summenzeile aus.</p>
+  </section>
+
+  <section class="card" style="margin-top:16px"><h2>Bestenliste</h2><div id="lb"></div></section>
+
+  <div class="grid cols-2" style="margin-top:16px">
+    <section class="card">
+      <h2>DSFA-Checkliste</h2>
+      <div class="kv" id="dpia-kv"></div>
+      <ul class="feed" id="dpia" style="max-height:none;margin-top:.8rem"></ul>
+    </section>
+    <section class="card">
+      <h2>Hallen-Abrechnung (Vorschau)</h2>
+      <div class="row"><div><label for="inv-games">Spiele im Monat</label><input id="inv-games" type="number" min="0" value="15"></div><div class="fit"><button id="inv-go">Berechnen</button></div></div>
+      <div id="inv" style="margin-top:.8rem"></div>
+    </section>
+  </div>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$;
+  CV.init({ roles: ['verband', 'admin'] });
+  function enc(x) { return encodeURIComponent(x); }
+
+  function loadBoard() {
+    var lg = $('#league').value; if (!lg) { CV.clear($('#lb')).appendChild(h('div', { class: 'empty', text: 'Keine Liga vorhanden.' })); return; }
+    CV.api('/leagues/' + enc(lg) + '/leaderboard?metric=' + $('#metric').value).then(function (d) {
+      var m = $('#metric').value;
+      CV.clear($('#lb')).appendChild(CV.table([
+        { key: 'rank', label: 'Rang' }, { key: 'name', label: 'Spieler', l: true }, { key: 'number', label: '#' }, { key: 'team', label: 'Team', l: true },
+        { key: 'games', label: 'Spiele' }, { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 0); } },
+        { key: 'value', label: $('#metric').selectedOptions[0].text, fmt: function (v) { return h('b', { text: CV.num(v, m === 'average_grade' ? 2 : 1) }); } },
+        { key: 'form', label: 'Form', sort: false, fmt: function (v) { return CV.sparkline(v, { w: 90, h: 26 }); } }
+      ], d.rows.map(function (r) {
+        var v = m === 'average_grade' ? r.average_grade : (r.radar[m] !== undefined ? r.radar[m] : r.bests[m]);
+        return Object.assign({}, r, { value: v });
+      }), { sortKey: 'rank', sortDir: 1, empty: 'Noch keine freigegebenen Spiele in dieser Liga.' }));
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+  CV.api('/games').then(function (gs) {
+    var seen = {}; gs.forEach(function (g) { if (g.league) seen[g.league] = 1; });
+    var sel = $('#league'); Object.keys(seen).forEach(function (l) { sel.appendChild(h('option', { value: l, text: l })); });
+    loadBoard();
+  });
+  $('#league').addEventListener('change', loadBoard);
+  $('#metric').addEventListener('change', loadBoard);
+
+  $('#csv').addEventListener('click', function () {
+    var lg = $('#league').value; if (!lg) return;
+    CV.api('/leagues/' + enc(lg) + '/export.csv').then(function (txt) {
+      var blob = new Blob(['﻿' + txt], { type: 'text/csv;charset=utf-8' });
+      var a = h('a', { href: URL.createObjectURL(blob), download: lg + '-export.csv' });
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }).catch(function (e) { CV.toast(e.message, true); });
+  });
+
+  function loadDpia() {
+    CV.api('/privacy/dpia').then(function (d) {
+      var kv = CV.clear($('#dpia-kv'));
+      kv.appendChild(h('div', null, h('b', { text: Math.round(d.progress * 100) + ' %' }), h('span', { text: 'erledigt' })));
+      kv.appendChild(h('div', null, h('b', { text: d.pilot_blockers.length }), h('span', { text: 'Pilot-Blocker offen' })));
+      var ul = CV.clear($('#dpia'));
+      d.items.forEach(function (i) {
+        ul.appendChild(h('li', null, h('span', { class: 'badge ' + (i.status === 'done' ? 'ok' : 'prov'), text: i.status === 'done' ? 'erledigt' : (i.status === 'in_progress' ? 'in Arbeit' : 'offen') }), ' ', i.title,
+          i.reference ? h('span', { class: 'muted small', text: ' (' + i.reference + ')' }) : null, i.blocks_pilot ? h('span', { class: 'badge', text: 'Pilot-Blocker', style: 'margin-left:.4rem' }) : null));
+      });
+    }).catch(function (e) { CV.clear($('#dpia')).appendChild(h('li', { class: 'empty', text: e.message })); });
+  }
+  loadDpia();
+
+  function invoice() {
+    CV.api('/pricing/invoice?games=' + (parseInt($('#inv-games').value, 10) || 0)).then(function (d) {
+      var root = CV.clear($('#inv'));
+      root.appendChild(CV.table([{ key: 'label', label: 'Position', l: true }, { key: 'amount', label: 'EUR', fmt: function (v) { return CV.num(v, 2); } }], d.lines.concat([{ label: 'Netto', amount: d.net, _cls: 'total' }, { label: 'USt', amount: d.vat, _cls: 'total' }, { label: 'Gesamt', amount: d.total, _cls: 'total' }]), { sortKey: null }));
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+  $('#inv-go').addEventListener('click', invoice);
+  invoice();
+})();
+</script>
+</body>
+</html>

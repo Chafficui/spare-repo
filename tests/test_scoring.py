@@ -560,7 +560,7 @@ def start_engine_home_only():
     return eng, evs
 
 
-def _sim_sub_scores(seed, noise=None, period_length_s=300.0):
+def _sim_sub_scores(seed, noise=None, period_length_s=600.0):
     from courtvision.domain.events import effective_events
     from courtvision.qa.review import event_f1
     from courtvision.sim import demo_setup, simulate_game

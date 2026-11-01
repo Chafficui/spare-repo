@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spielerprofil – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <section class="card" id="picker">
+    <div class="row">
+      <div><label for="p-team">Team</label><select id="p-team"></select></div>
+      <div><label for="p-player">Spieler</label><select id="p-player"></select></div>
+      <div class="fit"><button id="p-go" class="primary">Anzeigen</button></div>
+    </div>
+  </section>
+
+  <div id="msg"></div>
+  <div id="profile" class="hidden">
+    <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:baseline;margin:16px 0 8px">
+      <h1 id="p-title" style="margin:0"></h1><span class="muted" id="p-team-name"></span>
+      <span class="fit" style="margin-left:auto"><button id="share">Profil teilen</button></span>
+    </div>
+
+    <div class="kv" id="kv"></div>
+
+    <div class="grid cols-2" style="margin-top:16px">
+      <section class="card"><h2>Notenverlauf</h2><div id="spark"></div><p class="muted small" id="spark-note"></p></section>
+      <section class="card"><h2>Profil (Radar)</h2><div id="radar" style="display:flex;justify-content:center"></div></section>
+    </div>
+
+    <section class="card" style="margin-top:16px"><h2>Spiele</h2><div id="games"></div></section>
+
+    <section class="card" style="margin-top:16px">
+      <h2>Highlights <span class="badge">KI-generiert</span></h2>
+      <div id="reel"></div>
+    </section>
+
+    <section class="card hidden" id="consent-card" style="margin-top:16px">
+      <h2>Einwilligungen und Datenschutz</h2>
+      <p class="muted small">Du entscheidest, was sichtbar ist. Änderungen wirken sofort und werden protokolliert. Ohne öffentliche Freigabe erscheinen deine Werte nur als Team-Wert; Noten Minderjähriger sind nie öffentlich.</p>
+      <div id="consent"></div>
+    </section>
+  </div>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$, pid = null;
+  CV.init({});
+  function enc(x) { return encodeURIComponent(x); }
+  var LEVELS = [['STATS_INTERNAL', 'Statistiken intern (Team)'], ['STATS_PUBLIC', 'Statistiken öffentlich'], ['HIGHLIGHTS', 'Highlights'], ['LIVESTREAM', 'Livestream']];
+
+  // ---- Auswahl
+  var teamSel = $('#p-team'), playerSel = $('#p-player');
+  function loadPlayers() {
+    CV.clear(playerSel);
+    if (!teamSel.value) return;
+    CV.api('/teams/' + enc(teamSel.value) + '/players').then(function (ps) {
+      ps.forEach(function (p) { playerSel.appendChild(h('option', { value: p.id, text: '#' + p.number + ' ' + (p.name || '(nicht freigegeben)') })); });
+      if (pid && ps.some(function (p) { return p.id === pid; })) playerSel.value = pid;
+    });
+  }
+  CV.api('/teams').then(function (ts) {
+    ts.forEach(function (t) { teamSel.appendChild(h('option', { value: t.id, text: t.name })); });
+    var tid = CV.teamId(); if (tid && ts.some(function (t) { return t.id === tid; })) teamSel.value = tid;
+    loadPlayers();
+  });
+  teamSel.addEventListener('change', loadPlayers);
+  $('#p-go').addEventListener('click', function () { if (playerSel.value) open(playerSel.value); });
+
+  function open(id) {
+    pid = id;
+    var u = new URL(location.href); u.searchParams.set('id', id); history.replaceState(null, '', u);
+    CV.clear($('#msg'));
+    CV.api('/players/' + enc(id) + '/profile').then(render).catch(function (e) {
+      $('#profile').classList.add('hidden');
+      $('#msg').appendChild(h('div', { class: 'banner bad', style: 'margin-top:16px', text: e.status === 403 ? 'Keine Anzeige: ' + e.message : e.message }));
+    });
+  }
+
+  function render(d) {
+    $('#profile').classList.remove('hidden');
+    $('#p-title').textContent = '#' + d.player.number + ' ' + d.player.name;
+    $('#p-team-name').textContent = d.player.team_name;
+    var kv = CV.clear($('#kv'));
+    var items = [['Spiele', d.games], ['Minuten', CV.num(d.minutes, 0)],
+      ['Ø Note', d.rating_visible ? CV.num(d.average_grade, 1) : '–'],
+      ['Best Punkte', CV.num(d.bests.pts)], ['Best Rebounds', CV.num(d.bests.reb)], ['Best Assists', CV.num(d.bests.ast)]];
+    items.forEach(function (i) { kv.appendChild(h('div', null, h('b', { text: i[1] }), h('span', { text: i[0] }))); });
+    if (d.rating_visible && d.provisional) kv.appendChild(h('div', null, h('b', null, h('span', { class: 'badge prov', text: 'vorläufig' })), h('span', { text: 'Noten enthalten unbestätigte Ereignisse' })));
+    if (!d.rating_visible) kv.appendChild(h('div', null, h('b', { text: 'privat' }), h('span', { text: 'Noten sind nicht öffentlich' })));
+
+    var grades = (d.per_game || []).map(function (g) { return g.grade; }).filter(function (g) { return g !== null && g !== undefined; });
+    CV.clear($('#spark')).appendChild(CV.sparkline(grades, { w: 320, h: 90 }));
+    $('#spark-note').textContent = grades.length ? 'Letzte Note ' + grades[grades.length - 1].toFixed(1) + ' · Linie = 6,0 (Liga-Mitte)' : (d.rating_visible ? 'Noch keine Noten.' : 'Noten werden nicht angezeigt.');
+    CV.clear($('#radar')).appendChild(CV.radar(d.radar, { size: 320 }));
+
+    var rows = (d.per_game || []).map(function (g) { return Object.assign({}, g, { fg: g.fgm + '/' + g.fga, ft: g.ftm + '/' + g.fta }); });
+    CV.clear($('#games')).appendChild(CV.table([
+      { key: 'date', label: 'Datum', l: true }, { key: 'opponent', label: 'Gegner', l: true }, { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 0); } },
+      { key: 'pts', label: 'PKT' }, { key: 'reb', label: 'REB' }, { key: 'ast', label: 'AST' }, { key: 'stl', label: 'STL' }, { key: 'blk', label: 'BLK' }, { key: 'tov', label: 'TO' },
+      { key: 'fg', label: 'FG', sort: false }, { key: 'ft', label: 'FW', sort: false },
+      { key: 'grade', label: 'Note', fmt: function (v, r) { return v === null || v === undefined ? '–' : [h('b', { text: CV.num(v, 1) }), r.provisional ? h('span', { class: 'badge prov', text: 'vorl.', style: 'margin-left:.3rem' }) : null]; } }
+    ], rows, { sortKey: 'date', sortDir: -1, empty: 'Noch keine Einsätze.' }));
+
+    CV.api('/players/' + enc(pid) + '/reel').then(function (r) {
+      var root = CV.clear($('#reel'));
+      if (!r.plan) { root.appendChild(h('div', { class: 'empty', text: r.message || 'Keine Highlights.' })); return; }
+      root.appendChild(h('p', { class: 'muted', text: r.plan.segments.length + ' Szenen · ' + Math.round(r.plan.duration) + ' s · Kanal „' + r.channel + '“' }));
+      root.appendChild(h('ul', { class: 'feed' }, r.plan.segments.map(function (s) {
+        var o = s.overlay || {};
+        return h('li', null, h('b', { text: (o.period ? 'Q' + o.period + ' ' : '') + (o.clock || '') }), ' · Spielstand ' + (o.score_home !== null && o.score_home !== undefined ? o.score_home + ':' + o.score_away : '–') + ' · Clip ' + CV.fmtTs(s.start) + '–' + CV.fmtTs(s.end));
+      })));
+    }).catch(function () { /* ignorieren */ });
+    loadConsent();
+  }
+
+  // ---- Teilen
+  $('#share').addEventListener('click', function () {
+    var url = location.origin + location.pathname + '?id=' + enc(pid);
+    if (navigator.share) { navigator.share({ title: 'CourtVision', url: url }).catch(function () { /* abgebrochen */ }); return; }
+    if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { CV.toast('Link kopiert'); }, function () { prompt('Link kopieren:', url); });
+    else prompt('Link kopieren:', url);
+  });
+
+  // ---- Einwilligung
+  function post(body) {
+    return CV.tryApi('/players/' + enc(pid) + '/consent', { json: body }).then(function (r) { if (r) { CV.toast('Gespeichert'); loadConsent(); } });
+  }
+  function loadConsent() {
+    var card = $('#consent-card');
+    CV.api('/players/' + enc(pid) + '/consent').then(function (c) {
+      card.classList.remove('hidden');
+      var root = CV.clear($('#consent'));
+      var editable = ['spieler', 'hallenwart', 'admin'].indexOf(CV.role()) >= 0;
+      root.appendChild(h('p', null, c.objected ? h('span', { class: 'badge prov', text: 'Widerspruch / keine Freigabe aktiv' }) : h('span', { class: 'badge ok', text: 'Freigaben aktiv' }), ' ', c.is_minor ? h('span', { class: 'badge minor', text: 'minderjährig' }) : null));
+      var list = h('div');
+      LEVELS.forEach(function (l) {
+        var on = c.levels.indexOf(l[0]) >= 0;
+        list.appendChild(h('label', { style: 'display:flex;gap:.6rem;align-items:center;color:var(--ink);font-size:1rem' },
+          h('input', { type: 'checkbox', checked: on, disabled: !editable, onchange: function () { post({ action: this.checked ? 'grant' : 'revoke', level: [l[0]] }); } }), l[1]));
+      });
+      root.appendChild(list);
+      if (editable) {
+        var acts = h('div', { class: 'row', style: 'margin-top:.8rem' });
+        acts.appendChild(c.objected && !c.is_minor
+          ? h('button', { class: 'good fit', onclick: function () { post({ action: 'withdraw_objection' }); }, text: 'Widerspruch zurücknehmen' })
+          : (!c.objected ? h('button', { class: 'danger fit', onclick: function () { if (confirm('Widerspruch einlegen? Stats nur noch als Team-Wert, keine Highlights.')) post({ action: 'object' }); }, text: 'Widerspruch einlegen' }) : null));
+        if (c.is_minor) {
+          acts.appendChild(h('button', { class: 'fit', onclick: function () { post({ action: 'parental_consent', level: ['STATS_INTERNAL', 'STATS_PUBLIC', 'HIGHLIGHTS'] }); }, text: 'Elterneinwilligung erteilen' }));
+          acts.appendChild(h('button', { class: 'fit', onclick: function () { post({ action: 'revoke_parental' }); }, text: 'Elterneinwilligung widerrufen' }));
+          if (c.needs_child_consent) acts.appendChild(h('button', { class: 'fit', onclick: function () { post({ action: 'child_consent' }); }, text: 'Eigene Einwilligung des Kindes' }));
+        }
+        root.appendChild(acts);
+      }
+      root.appendChild(h('h3', { style: 'margin-top:1rem', text: 'Protokoll' }));
+      root.appendChild(CV.table([
+        { key: 'when', label: 'Zeit', l: true }, { key: 'actor', label: 'Wer', l: true }, { key: 'action', label: 'Aktion', l: true }, { key: 'level', label: 'Stufe', l: true }, { key: 'note', label: 'Notiz', l: true }
+      ], c.audit.slice().reverse().map(function (a) { return { when: new Date(a.ts * 1000).toLocaleString('de-DE'), actor: a.actor, action: a.action, level: a.level, note: a.note }; }), { empty: 'Noch keine Änderungen.' }));
+    }).catch(function () { card.classList.add('hidden'); });
+  }
+
+  var want = CV.qs('id') || (CV.role() === 'spieler' ? CV.playerId() : '');
+  if (want) { pid = want; open(want); }
+  else $('#msg').appendChild(h('div', { class: 'empty', text: 'Wähle oben ein Team und einen Spieler.' }));
+})();
+</script>
+</body>
+</html>

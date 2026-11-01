@@ -284,3 +284,26 @@ def test_leaderboard_excludes_minors():
     board = leaderboard(ps, minors={"kid"})
     assert [p.player_id for p in board] == ["adult2", "adult1"]
     assert [p.player_id for p in leaderboard(ps, minors=set(), limit=1, min_games=1)] == ["kid"]
+
+
+def test_partial_scoreboard_reading_is_ignored():
+    from courtvision.domain.events import Event, EventType
+    from courtvision.domain.models import Game
+    from courtvision.stats.boxscore import compute_boxscore
+    g = Game(id="g", home_team_id="h", away_team_id="a")
+    evs = [Event(game_id="g", type=EventType.SCOREBOARD, video_ts=1, payload={"home": 2, "away": 0}),
+           Event(game_id="g", type=EventType.SCOREBOARD, video_ts=2, payload={"home": None, "away": 3})]
+    assert compute_boxscore(evs, g, {"home": [], "away": []}).score == {"home": 2, "away": 0}
+
+
+def test_offensive_foul_counts_as_turnover_once():
+    from courtvision.domain.events import Event, EventType
+    from courtvision.domain.models import Game
+    from courtvision.stats.boxscore import compute_boxscore
+    g = Game(id="g", home_team_id="h", away_team_id="a")
+    foul = Event(game_id="g", type=EventType.FOUL, video_ts=5, team="home", player_id="p1",
+                 payload={"kind": "offensive", "fouled_id": None})
+    to = Event(game_id="g", type=EventType.TURNOVER, video_ts=5.5, team="home", player_id="p1",
+               payload={"kind": "offensive_foul"})
+    assert compute_boxscore([foul], g, {"home": [], "away": []}).players["p1"].tov == 1
+    assert compute_boxscore([foul, to], g, {"home": [], "away": []}).players["p1"].tov == 1

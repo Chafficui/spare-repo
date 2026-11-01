@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <h1>Setup <span class="badge">Hallenwart</span></h1>
+  <p class="muted">Teams und Kader anlegen, Spiel planen, Kamera kalibrieren, Aufstellung wählen, Spiel starten.</p>
+
+  <div class="grid cols-2">
+    <section class="card" aria-labelledby="h-team">
+      <h2 id="h-team">1 · Halle und Teams</h2>
+      <form id="f-venue" class="row">
+        <div><label for="v-name">Halle</label><input id="v-name" required placeholder="Anhalt-Arena"></div>
+        <div><label for="v-city">Ort</label><input id="v-city" placeholder="Dessau"></div>
+        <div><label for="v-sb">Anzeigetafel</label><select id="v-sb"><option value="data">Datenschnittstelle</option><option value="second_camera">zweite Kamera</option><option value="main_camera">Hauptkamera</option><option value="none">keine</option></select></div>
+        <div class="fit"><button class="primary">Halle anlegen</button></div>
+      </form>
+      <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+      <form id="f-team" class="row">
+        <div><label for="t-name">Team</label><input id="t-name" required placeholder="TV Dessau Herren 1"></div>
+        <div><label for="t-club">Verein</label><input id="t-club"></div>
+        <div><label for="t-league">Liga</label><input id="t-league" placeholder="Oberliga"></div>
+        <div><label for="t-age">Altersklasse</label><input id="t-age" value="Senioren"></div>
+        <div><label for="t-color">Trikotfarbe</label><input id="t-color" type="color" value="#1f4fa3"></div>
+        <div class="fit"><button class="primary">Team anlegen</button></div>
+      </form>
+    </section>
+
+    <section class="card" aria-labelledby="h-roster">
+      <h2 id="h-roster">2 · Kader per CSV</h2>
+      <p class="muted small">Spalten: <code>number;name;birth_year;consent</code> (Trennzeichen <code>;</code> oder <code>,</code>). Geburtsjahr und Einwilligung sind optional. <b>Minderjährige</b> werden anhand des Geburtsjahrs erkannt und gelten ohne Elterneinwilligung als „Widerspruch“ (nur Team-Wert, keine Highlights). Einwilligung: <code>ja</code>, <code>nein</code> oder <code>intern|public|highlights|livestream</code>.</p>
+      <label for="r-team">Team</label><select id="r-team"></select>
+      <label for="r-file">CSV-Datei</label><input id="r-file" type="file" accept=".csv,text/csv,text/plain">
+      <label for="r-text">… oder CSV einfügen</label>
+      <textarea id="r-text" rows="4" placeholder="number;name;birth_year;consent&#10;7;Felix Brandt;1998;"></textarea>
+      <div style="margin-top:.6rem"><button id="r-go" class="primary">Kader importieren</button></div>
+      <div id="r-out" style="margin-top:.8rem"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px" aria-labelledby="h-game">
+    <h2 id="h-game">3 · Spiel anlegen</h2>
+    <form id="f-game" class="row">
+      <div><label for="g-venue">Halle</label><select id="g-venue"></select></div>
+      <div><label for="g-home">Heim</label><select id="g-home"></select></div>
+      <div><label for="g-away">Gast</label><select id="g-away"></select></div>
+      <div><label for="g-league">Liga (optional)</label><input id="g-league"></div>
+      <div><label for="g-start">Beginn</label><input id="g-start" type="datetime-local"></div>
+      <div class="fit"><button class="primary">Spiel anlegen</button></div>
+    </form>
+  </section>
+
+  <section class="card" style="margin-top:16px" aria-labelledby="h-cal">
+    <h2 id="h-cal">4 · Kamera kalibrieren</h2>
+    <div class="row">
+      <div><label for="c-game">Spiel</label><select id="c-game"></select></div>
+      <div><label for="c-img">Standbild der Kamera</label><input id="c-img" type="file" accept="image/*"></div>
+      <div class="fit"><button id="c-blank" type="button" title="Ohne Bild: leere Fläche zum Testen">Leere Fläche</button></div>
+    </div>
+    <p class="muted small">Bild hochladen oder mit Strg+V einfügen. Landmarke wählen, dann im Bild anklicken (mindestens 4, möglichst verteilt). Nach „Berechnen“ erscheinen die projizierten Feldlinien zur Kontrolle.</p>
+    <div class="grid cols-2">
+      <div>
+        <div class="canvaswrap"><canvas id="cv" width="960" height="540" aria-label="Kamerabild zum Anklicken der Landmarken"></canvas></div>
+      </div>
+      <div>
+        <label for="c-lm">Landmarke</label><select id="c-lm"></select>
+        <div class="row" style="margin-top:.6rem">
+          <button id="c-calc" class="primary" type="button">Berechnen</button>
+          <button id="c-undo" type="button">Letzten Punkt entfernen</button>
+          <button id="c-reset" type="button" class="danger">Zurücksetzen</button>
+        </div>
+        <div id="c-points" class="small muted" style="margin:.6rem 0"></div>
+        <div id="c-result" role="status"></div>
+        <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+        <h3>Zonen (Wechselzone, Bänke)</h3>
+        <div class="row">
+          <div><label for="z-name">Zone</label><select id="z-name"><option value="substitution">Wechselzone</option><option value="bench_home">Bank Heim</option><option value="bench_away">Bank Gast</option></select></div>
+          <div class="fit"><button id="z-draw" type="button" aria-pressed="false">Zone zeichnen</button></div>
+          <div class="fit"><button id="z-close" type="button">Abschließen</button></div>
+        </div>
+        <div id="z-list" class="small muted" style="margin-top:.5rem">Zonen werden im Bild gezeichnet und in Feldkoordinaten gespeichert (nach „Berechnen“ möglich).</div>
+        <div style="margin-top:.8rem"><button id="c-save" class="primary" type="button">Kalibrierung mit Zonen speichern</button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" style="margin-top:16px" aria-labelledby="h-start">
+    <h2 id="h-start">5 · Aufstellung und Spielstart</h2>
+    <div class="row"><div><label for="s-game">Spiel</label><select id="s-game"></select></div></div>
+    <div class="grid cols-2" id="s-teams" style="margin-top:12px"></div>
+    <div class="row" style="margin-top:12px">
+      <div class="fit"><button id="s-start" class="primary lg" disabled>Spiel starten</button></div>
+      <div class="fit"><button id="s-end" class="danger">Spiel beenden</button></div>
+      <div class="fit"><span id="s-status" class="badge"></span></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div><label for="m-stream">Stream-URL (optional)</label><input id="m-stream" placeholder="https://…"></div>
+      <div><label for="m-video">Video-URL für Korrekturclips (optional)</label><input id="m-video" placeholder="/aufnahme.mp4"></div>
+      <div class="fit"><button id="m-save">Speichern</button></div>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$;
+  CV.init({ roles: ['hallenwart', 'admin'] });
+  var teams = [], geo = null;
+
+  function fillSelect(sel, items, label) {
+    var cur = sel.value; CV.clear(sel);
+    items.forEach(function (x) { sel.appendChild(h('option', { value: x.id, text: label(x) })); });
+    if (cur) sel.value = cur;
+  }
+  function loadMaster() {
+    return Promise.all([CV.api('/venues'), CV.api('/teams')]).then(function (r) {
+      teams = r[1];
+      fillSelect($('#g-venue'), r[0], function (v) { return v.name + (v.city ? ', ' + v.city : ''); });
+      ['#r-team', '#g-home', '#g-away'].forEach(function (id) { fillSelect($(id), teams, function (t) { return t.name + (t.league ? ' (' + t.league + ')' : ''); }); });
+      if (teams.length > 1 && $('#g-home').value === $('#g-away').value) $('#g-away').value = teams[1].id;
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+  function onSubmit(id, fn) { $(id).addEventListener('submit', function (e) { e.preventDefault(); fn(); }); }
+
+  onSubmit('#f-venue', function () {
+    CV.tryApi('/venues', { json: { name: $('#v-name').value, city: $('#v-city').value, scoreboard_source: $('#v-sb').value } })
+      .then(function (v) { if (v) { CV.toast('Halle angelegt: ' + v.name); loadMaster(); } });
+  });
+  onSubmit('#f-team', function () {
+    CV.tryApi('/teams', { json: { name: $('#t-name').value, club: $('#t-club').value, league: $('#t-league').value, age_class: $('#t-age').value, jersey_color: $('#t-color').value } })
+      .then(function (t) { if (t) { CV.toast('Team angelegt: ' + t.name); loadMaster(); } });
+  });
+
+  // ---- CSV
+  $('#r-file').addEventListener('change', function () {
+    var f = this.files[0]; if (!f) return;
+    f.text().then(function (t) { $('#r-text').value = t; });
+  });
+  $('#r-go').addEventListener('click', function () {
+    var team = $('#r-team').value, text = $('#r-text').value;
+    if (!team || !text.trim()) { CV.toast('Team wählen und CSV angeben', true); return; }
+    CV.tryApi('/teams/' + encodeURIComponent(team) + '/roster.csv', { body: text, contentType: 'text/csv; charset=utf-8' }).then(function (r) {
+      if (!r) return;
+      var out = CV.clear($('#r-out'));
+      out.appendChild(h('p', null, h('b', { text: r.imported + ' importiert' }), ' (' + r.created + ' neu, ' + r.updated + ' aktualisiert), ' + r.minors + ' minderjährig im Kader'));
+      if (r.errors.length) out.appendChild(h('ul', { class: 'small' }, r.errors.map(function (e) { return h('li', { class: 'away', text: 'Zeile ' + e.line + ': ' + e.message }); })));
+      out.appendChild(CV.table([
+        { key: 'number', label: '#' }, { key: 'name', label: 'Name', l: true },
+        { key: 'is_minor', label: 'Status', l: true, sort: false, fmt: function (v, row) { return [v ? h('span', { class: 'badge minor', text: 'minderjährig' }) : h('span', { class: 'badge', text: 'erwachsen' }), (row.consent & 32) ? h('span', { class: 'badge prov', style: 'margin-left:.3rem', text: 'keine Freigabe' }) : null]; } }
+      ], r.players, { sortKey: 'number', sortDir: 1 }));
+      loadStarters();
+    });
+  });
+
+  onSubmit('#f-game', function () {
+    if ($('#g-home').value === $('#g-away').value) { CV.toast('Heim und Gast müssen verschieden sein', true); return; }
+    var st = $('#g-start').value;
+    var body = { venue_id: $('#g-venue').value, home_team_id: $('#g-home').value, away_team_id: $('#g-away').value, start_time: st ? st + ':00' : '' };
+    if ($('#g-league').value.trim()) body.league = $('#g-league').value.trim();
+    CV.tryApi('/games', { json: body }).then(function (g) { if (g) { CV.toast('Spiel angelegt'); refreshGames(g.id); } });
+  });
+
+  // ---- Kalibrierung
+  var canvas = $('#cv'), ctx = canvas.getContext('2d');
+  var img = null, clicks = {}, order = [], zones = {}, poly = [], zoneMode = false, H = null, Hinv = null;
+
+  function applyM(M, x, y) {
+    var w = M[2][0] * x + M[2][1] * y + M[2][2];
+    return [(M[0][0] * x + M[0][1] * y + M[0][2]) / w, (M[1][0] * x + M[1][1] * y + M[1][2]) / w];
+  }
+  function setImage(im) {
+    img = im; canvas.width = im.naturalWidth || im.width; canvas.height = im.naturalHeight || im.height;
+    clicks = {}; order = []; zones = {}; poly = []; H = Hinv = null; draw(); listPoints(); nextLandmark();
+  }
+  function loadFile(file) {
+    var url = URL.createObjectURL(file), im = new Image();
+    im.onload = function () { setImage(im); URL.revokeObjectURL(url); };
+    im.onerror = function () { CV.toast('Bild konnte nicht gelesen werden', true); };
+    im.src = url;
+  }
+  $('#c-img').addEventListener('change', function () { if (this.files[0]) loadFile(this.files[0]); });
+  document.addEventListener('paste', function (e) {
+    var items = (e.clipboardData || {}).items || [];
+    for (var i = 0; i < items.length; i++) if (items[i].type.indexOf('image') === 0) { loadFile(items[i].getAsFile()); e.preventDefault(); return; }
+  });
+  $('#c-blank').addEventListener('click', function () {
+    var c = document.createElement('canvas'); c.width = 1280; c.height = 720;
+    var x = c.getContext('2d'); x.fillStyle = '#556'; x.fillRect(0, 0, 1280, 720);
+    var im = new Image(); im.onload = function () { setImage(im); }; im.src = c.toDataURL();
+  });
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (img) ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    else { ctx.fillStyle = '#334'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#ccd'; ctx.font = '24px sans-serif'; ctx.fillText('Standbild laden oder einfügen (Strg+V)', 30, 50); }
+    var lw = Math.max(2, canvas.width / 480);
+    if (Hinv && geo) {
+      ctx.strokeStyle = 'rgba(255,200,0,.9)'; ctx.lineWidth = lw;
+      var lines = [geo.lines.outline, geo.lines.midline, geo.lines.lane_left, geo.lines.lane_right, geo.three_point.left, geo.three_point.right];
+      lines.forEach(function (pl) { ctx.beginPath(); pl.forEach(function (p, i) { var q = applyM(Hinv, p[0], p[1]); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }); ctx.stroke(); });
+      ctx.strokeStyle = 'rgba(80,220,255,.95)';
+      Object.keys(zones).forEach(function (n) {
+        ctx.beginPath(); zones[n].forEach(function (p, i) { var q = applyM(Hinv, p[0], p[1]); if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]); }); ctx.closePath(); ctx.stroke();
+      });
+    }
+    if (poly.length) { ctx.strokeStyle = '#4fe'; ctx.fillStyle = '#4fe'; ctx.beginPath(); poly.forEach(function (p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); ctx.fillRect(p[0] - 3, p[1] - 3, 6, 6); }); ctx.stroke(); }
+    ctx.font = Math.round(lw * 7) + 'px sans-serif';
+    order.forEach(function (n) {
+      var p = clicks[n]; ctx.fillStyle = '#ff3b30'; ctx.beginPath(); ctx.arc(p[0], p[1], lw * 2.5, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(n, p[0] + 8, p[1] - 8); ctx.fillText(n, p[0] + 8, p[1] - 8); ctx.lineWidth = lw;
+    });
+  }
+  function listPoints() {
+    var box = CV.clear($('#c-points'));
+    box.appendChild(document.createTextNode(order.length ? order.length + ' Punkte: ' + order.join(', ') : 'Noch keine Punkte gesetzt.'));
+  }
+  function nextLandmark() {
+    var sel = $('#c-lm'), opts = Array.prototype.map.call(sel.options, function (o) { return o.value; });
+    var nxt = opts.find(function (n) { return !clicks[n]; });
+    if (nxt) sel.value = nxt;
+  }
+  canvas.addEventListener('click', function (e) {
+    var r = canvas.getBoundingClientRect();
+    var u = (e.clientX - r.left) * canvas.width / r.width, v = (e.clientY - r.top) * canvas.height / r.height;
+    if (zoneMode) { poly.push([u, v]); draw(); return; }
+    var n = $('#c-lm').value; if (!n) return;
+    if (!clicks[n]) order.push(n);
+    clicks[n] = [u, v]; draw(); listPoints(); nextLandmark();
+  });
+  $('#c-undo').addEventListener('click', function () { var n = order.pop(); if (n) delete clicks[n]; draw(); listPoints(); });
+  $('#c-reset').addEventListener('click', function () { clicks = {}; order = []; zones = {}; poly = []; H = Hinv = null; draw(); listPoints(); CV.clear($('#c-result')); listZones(); });
+
+  function submitCalibration(withZones) {
+    var gid = $('#c-game').value;
+    if (!gid) { CV.toast('Bitte ein Spiel wählen', true); return Promise.resolve(); }
+    if (order.length < 4) { CV.toast('Mindestens 4 Landmarken anklicken', true); return Promise.resolve(); }
+    var body = { clicks: clicks, image_width: canvas.width, image_height: canvas.height };
+    if (withZones && Object.keys(zones).length) body.zones = zones;
+    return CV.tryApi('/games/' + encodeURIComponent(gid) + '/calibration', { json: body }).then(function (r) {
+      if (!r) return;
+      H = r.homography; Hinv = r.homography_inv; draw();
+      var box = CV.clear($('#c-result'));
+      box.appendChild(h('div', { class: 'banner' + (r.ok ? '' : ' bad'), style: r.ok ? 'border-color:var(--ok);color:var(--ok)' : '' },
+        'Mittlerer Reprojektionsfehler: ' + r.reprojection_error_px.toFixed(2) + ' px – ' + r.message));
+      return r;
+    });
+  }
+  $('#c-calc').addEventListener('click', function () { submitCalibration(false); });
+  $('#c-save').addEventListener('click', function () { submitCalibration(true).then(function (r) { if (r) CV.toast('Kalibrierung gespeichert'); }); });
+
+  $('#z-draw').addEventListener('click', function () {
+    if (!H) { CV.toast('Erst „Berechnen“, damit Bildpunkte in Feldmeter umgerechnet werden können', true); return; }
+    zoneMode = !zoneMode; this.setAttribute('aria-pressed', zoneMode); this.textContent = zoneMode ? 'Zeichnen … (Bild anklicken)' : 'Zone zeichnen'; poly = []; draw();
+  });
+  $('#z-close').addEventListener('click', function () {
+    if (poly.length < 3) { CV.toast('Mindestens 3 Punkte', true); return; }
+    zones[$('#z-name').value] = poly.map(function (p) { var q = applyM(H, p[0], p[1]); return [Math.round(q[0] * 100) / 100, Math.round(q[1] * 100) / 100]; });
+    poly = []; zoneMode = false; $('#z-draw').setAttribute('aria-pressed', 'false'); $('#z-draw').textContent = 'Zone zeichnen'; draw(); listZones();
+  });
+  function listZones() {
+    var box = CV.clear($('#z-list')); var names = Object.keys(zones);
+    box.appendChild(document.createTextNode(names.length ? 'Zonen: ' + names.map(function (n) { return n + ' (' + zones[n].length + ' Punkte)'; }).join(', ') : 'Noch keine Zonen.'));
+  }
+
+  // ---- Spiele, Aufstellung
+  var gameList = [];
+  function refreshGames(select) {
+    return CV.api('/games').then(function (gs) {
+      gameList = gs;
+      ['#c-game', '#s-game'].forEach(function (id) { fillSelect($(id), gs, function (g) { return g.home_name + ' – ' + g.away_name + ' (' + (CV.STATUS_DE[g.status] || g.status) + ')'; }); if (select) $(id).value = select; });
+      loadStarters();
+    });
+  }
+  var rosters = { home: [], away: [] };
+  function loadStarters() {
+    var gid = $('#s-game').value, g = gameList.find(function (x) { return x.id === gid; });
+    var box = CV.clear($('#s-teams'));
+    $('#s-start').disabled = true;
+    if (!g) return;
+    $('#s-status').textContent = CV.STATUS_DE[g.status] || g.status;
+    var st = $('#m-stream'); st.value = ''; $('#m-video').value = '';
+    Promise.all([CV.api('/teams/' + encodeURIComponent(g.home_team_id) + '/players'), CV.api('/teams/' + encodeURIComponent(g.away_team_id) + '/players')]).then(function (r) {
+      rosters.home = r[0]; rosters.away = r[1];
+      [['home', g.home_name, r[0]], ['away', g.away_name, r[1]]].forEach(function (t) {
+        var cnt = h('span', { class: 'badge', text: '0/5' });
+        var list = h('div', { class: 'starter-list' });
+        t[2].forEach(function (p) {
+          var cb = h('input', { type: 'checkbox', value: p.id, 'data-side': t[0], id: 'st-' + p.id, onchange: update });
+          list.appendChild(h('label', { for: 'st-' + p.id }, cb, h('b', { class: 'nowrap', text: '#' + p.number }), ' ', p.name || '(ohne Name)', p.is_minor ? h('span', { class: 'badge minor', text: 'U18' }) : null));
+        });
+        if (!t[2].length) list.appendChild(h('p', { class: 'empty', text: 'Kader leer – CSV importieren' }));
+        box.appendChild(h('div', { class: 'card' }, h('h3', { class: t[0] }, t[1] + ' – Starter ', cnt), list));
+      });
+      function update() {
+        var nh = document.querySelectorAll('input[data-side="home"]:checked').length;
+        var na = document.querySelectorAll('input[data-side="away"]:checked').length;
+        var badges = box.querySelectorAll('h3 > .badge');
+        badges[0].textContent = nh + '/5'; badges[1].textContent = na + '/5';
+        $('#s-start').disabled = !(nh === 5 && na === 5 && g.status === 'scheduled');
+      }
+      update();
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+  $('#s-game').addEventListener('change', loadStarters);
+  $('#s-start').addEventListener('click', function () {
+    var gid = $('#s-game').value, starters = { home: [], away: [] };
+    document.querySelectorAll('#s-teams input:checked').forEach(function (cb) { starters[cb.getAttribute('data-side')].push(cb.value); });
+    CV.tryApi('/games/' + encodeURIComponent(gid) + '/start', { json: { starters: starters } }).then(function (r) { if (r) { CV.toast('Spiel läuft'); refreshGames(gid); } });
+  });
+  $('#s-end').addEventListener('click', function () {
+    var gid = $('#s-game').value;
+    if (!gid || !confirm('Spiel wirklich beenden (Abpfiff)?')) return;
+    CV.tryApi('/games/' + encodeURIComponent(gid) + '/end', { method: 'POST' }).then(function (r) { if (r) { CV.toast('Spiel beendet – Korrekturliste offen'); refreshGames(gid); } });
+  });
+  $('#m-save').addEventListener('click', function () {
+    var gid = $('#s-game').value; if (!gid) return;
+    CV.tryApi('/games/' + encodeURIComponent(gid) + '/media', { method: 'PUT', json: { stream_url: $('#m-stream').value || null, video_url: $('#m-video').value || null } }).then(function (r) { if (r) CV.toast('Gespeichert'); });
+  });
+
+  CV.api('/court/geometry').then(function (g) {
+    geo = g; var sel = $('#c-lm');
+    Object.keys(g.landmarks).forEach(function (n) { sel.appendChild(h('option', { value: n, text: n + ' (' + g.landmarks[n][0].toFixed(1) + ' / ' + g.landmarks[n][1].toFixed(1) + ' m)' })); });
+    nextLandmark();
+  });
+  draw(); listPoints(); listZones();
+  loadMaster().then(function () { return refreshGames(CV.qs('game')); });
+})();
+</script>
+</body>
+</html>

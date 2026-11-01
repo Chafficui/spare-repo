@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trainer-Dashboard – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <div class="row" style="margin-bottom:12px">
+    <div><label for="game">Spiel</label><select id="game"></select></div>
+    <div class="fit"><span id="conn" class="badge">offline</span> <span id="st" class="badge"></span></div>
+  </div>
+
+  <section class="card" aria-live="polite">
+    <div class="scorebug">
+      <div class="team home" id="home-name">Heim</div><div class="pts home" id="home-pts">0</div>
+      <div class="mid"><div class="clock" id="clock">--:--</div><div id="period" class="muted small"></div></div>
+      <div class="pts away" id="away-pts">0</div><div class="team away" id="away-name">Gast</div>
+    </div>
+  </section>
+
+  <div class="tabs" role="tablist" style="margin-top:16px" id="tabs"></div>
+
+  <section class="card" id="tab-box">
+    <h2>Box-Score</h2>
+    <p class="muted small" id="boxnote"></p>
+    <div id="box"></div>
+  </section>
+
+  <section class="card hidden" id="tab-shots">
+    <h2>Shot Chart</h2>
+    <div class="row">
+      <div><label for="sc-player">Spieler</label><select id="sc-player"><option value="">Alle</option></select></div>
+      <div><label for="sc-team">Team</label><select id="sc-team"><option value="">Beide</option><option value="home">Heim</option><option value="away">Gast</option></select></div>
+    </div>
+    <div style="margin:.8rem 0" id="sc-sum" class="kv"></div>
+    <div id="court"></div>
+    <p class="muted small"><span class="home">●</span> Treffer · <span class="away">○</span> Fehlwurf · Position in Feldmetern, Dreierlinie eingezeichnet.</p>
+  </section>
+
+  <section class="card hidden" id="tab-lineups">
+    <h2>Lineups</h2>
+    <p class="muted small">Fünferformationen deines Teams mit Einsatzzeit und Plus/Minus (Net).</p>
+    <div id="lineups"></div>
+  </section>
+
+  <section class="card hidden" id="tab-pbp">
+    <h2>Play-by-Play</h2>
+    <ul class="feed" id="pbp" style="max-height:640px"></ul>
+  </section>
+
+  <section class="card hidden" id="tab-ratings">
+    <h2>Spielnoten</h2>
+    <p class="muted small">Note 1,0–10,0 (Perzentil in Liga und Altersklasse). „vorläufig“: es gibt noch unbestätigte Ereignisse. Zusätzlich PIR, EFF und Game Score.</p>
+    <div id="ratings"></div>
+  </section>
+
+  <section class="card hidden" id="tab-hl">
+    <h2>Highlights <span class="badge">KI-generiert</span></h2>
+    <p class="muted small" id="hl-note"></p>
+    <div id="hl-recap"></div>
+    <div id="hl"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$, gid = null, liveH = null, geo = null, boxData = null, tab = 'box';
+  CV.init({ roles: ['trainer', 'admin'] });
+  function enc(x) { return encodeURIComponent(x); }
+  function setConn(st) { var b = $('#conn'); b.textContent = st === 'open' ? 'Live-Verbindung' : 'getrennt'; b.className = 'badge' + (st === 'open' ? ' ok' : ''); }
+  var TABS = [['box', 'Box-Score'], ['shots', 'Shot Chart'], ['lineups', 'Lineups'], ['pbp', 'Play-by-Play'], ['ratings', 'Noten'], ['hl', 'Highlights']];
+  var tabsEl = $('#tabs');
+  TABS.forEach(function (t) {
+    tabsEl.appendChild(h('button', { role: 'tab', 'aria-selected': t[0] === tab, 'data-t': t[0], text: t[1], onclick: function () { show(t[0]); } }));
+  });
+  function show(t) {
+    tab = t;
+    tabsEl.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-selected', b.getAttribute('data-t') === t); });
+    TABS.forEach(function (x) { $('#tab-' + x[0]).classList.toggle('hidden', x[0] !== t); });
+    if (t === 'shots') loadShots();
+    if (t === 'hl') loadHighlights();
+  }
+
+  function renderLive(d) {
+    $('#home-name').textContent = d.home.name; $('#away-name').textContent = d.away.name;
+    $('#home-pts').textContent = d.home.score; $('#away-pts').textContent = d.away.score;
+    $('#clock').textContent = d.clock_text || '--:--';
+    $('#period').textContent = d.period ? (d.period > 4 ? 'OT' + (d.period - 4) : 'Viertel ' + d.period) : '';
+    $('#st').textContent = (CV.STATUS_DE[d.status] || d.status) + (d.box_status === 'provisional' ? ' · vorläufig' : '');
+    var f = CV.clear($('#pbp'));
+    if (!d.playbyplay.length) f.appendChild(h('li', { class: 'empty', text: 'Noch keine Ereignisse.' }));
+    d.playbyplay.forEach(function (i) { f.appendChild(h('li', null, i.text, i.provisional ? h('span', { class: 'badge prov', text: 'vorläufig', style: 'margin-left:.4rem' }) : null)); });
+  }
+
+  function pctStr(m, a) { return a ? m + '/' + a + ' (' + Math.round(100 * m / a) + ' %)' : '–'; }
+  function statRow(p) {
+    return { number: p.number, name: p.name, minutes: p.minutes, pts: p.pts, reb: p.reb, ast: p.ast, stl: p.stl, blk: p.blk, tov: p.tov, pf: p.pf, plus_minus: p.plus_minus,
+      fg: pctStr(p.fgm, p.fga), fg3: pctStr(p.fg3m, p.fg3a), ft: pctStr(p.ftm, p.fta), ts: p.ts_pct, prov: p.provisional_events };
+  }
+  var BOXCOLS = [
+    { key: 'number', label: '#' }, { key: 'name', label: 'Spieler', l: true }, { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 0); } },
+    { key: 'pts', label: 'PKT' }, { key: 'reb', label: 'REB' }, { key: 'ast', label: 'AST' }, { key: 'stl', label: 'STL' }, { key: 'blk', label: 'BLK' }, { key: 'tov', label: 'TO' }, { key: 'pf', label: 'PF' },
+    { key: 'plus_minus', label: '+/-' }, { key: 'fg', label: 'FG', sort: false }, { key: 'fg3', label: '3P', sort: false }, { key: 'ft', label: 'FW', sort: false },
+    { key: 'ts', label: 'TS%', fmt: function (v) { return CV.pct(v); } },
+    { key: 'prov', label: '', sort: false, fmt: function (v) { return v ? h('span', { class: 'badge prov', text: 'vorläufig' }) : ''; } }
+  ];
+  function renderBox(b) {
+    boxData = b;
+    $('#boxnote').textContent = b.note || (b.status === 'provisional' ? 'Vorläufiger Box-Score – unbestätigte Ereignisse sind markiert.' : 'Freigegeben.');
+    var root = CV.clear($('#box'));
+    ['home', 'away'].forEach(function (side) {
+      var t = b[side], tot = t.totals;
+      var rows = b.players.filter(function (p) { return p.team === side; }).map(statRow);
+      rows.push({ _cls: 'total', number: '', name: 'Team', minutes: null, pts: tot.pts, reb: tot.reb + t.team_rebounds, ast: tot.ast, stl: tot.stl, blk: tot.blk, tov: tot.tov + t.team_turnovers, pf: tot.pf,
+        plus_minus: null, fg: pctStr(tot.fgm, tot.fga), fg3: pctStr(tot.fg3m, tot.fg3a), ft: pctStr(tot.ftm, tot.fta), ts: tot.ts_pct, prov: 0 });
+      var fouls = Object.keys(t.team_fouls_by_period).map(function (k) { return 'Q' + k + ': ' + t.team_fouls_by_period[k]; }).join(' · ');
+      root.appendChild(h('h3', { class: side, text: t.name + ' – ' + t.points }));
+      root.appendChild(CV.table(BOXCOLS, rows, { sortKey: 'number', sortDir: 1 }));
+      root.appendChild(h('p', { class: 'muted small', text: 'Teamfouls ' + (fouls || '–') }));
+    });
+    // Spielerliste Shot Chart
+    var sel = $('#sc-player'), cur = sel.value; CV.clear(sel); sel.appendChild(h('option', { value: '', text: 'Alle' }));
+    b.players.slice().sort(function (a, c) { return a.team === c.team ? a.number - c.number : (a.team === 'home' ? -1 : 1); }).forEach(function (p) {
+      sel.appendChild(h('option', { value: p.player_id, text: '#' + p.number + ' ' + (p.name || '') }));
+    });
+    sel.value = cur;
+    renderLineups(b); renderRatings(b);
+  }
+
+  function renderLineups(b) {
+    var root = CV.clear($('#lineups'));
+    if (!b.lineups.length) { root.appendChild(h('div', { class: 'empty', text: 'Keine Lineup-Daten für dein Team (Trainer-Rolle mit Team wählen).' })); return; }
+    var rows = b.lineups.map(function (l) {
+      return { side: l.side, players: l.players.map(function (p) { return '#' + p.number; }).join(' '), names: l.players.map(function (p) { return p.name; }).join(', '), minutes: l.seconds / 60, pf: l.pts_for, pa: l.pts_against, net: l.net };
+    });
+    root.appendChild(CV.table([
+      { key: 'side', label: 'Team', l: true, fmt: function (v) { return v === 'home' ? 'Heim' : 'Gast'; } },
+      { key: 'players', label: 'Fünf', l: true, fmt: function (v, r) { return h('span', { title: r.names, text: v }); } },
+      { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 1); } },
+      { key: 'pf', label: 'Punkte +' }, { key: 'pa', label: 'Punkte −' },
+      { key: 'net', label: 'Net', fmt: function (v) { return h('b', { class: v > 0 ? 'home' : (v < 0 ? 'away' : ''), text: (v > 0 ? '+' : '') + v }); } }
+    ], rows, { sortKey: 'minutes' }));
+  }
+
+  function renderRatings(b) {
+    var rows = b.players.filter(function (p) { return p.rating; }).map(function (p) {
+      return { number: p.number, name: p.name, team: p.team, minutes: p.minutes, grade: p.rating.grade, prov: p.rating.provisional, pir: p.rating.pir, eff: p.rating.eff, gmsc: p.rating.game_score, pct: p.rating.percentile };
+    });
+    var root = CV.clear($('#ratings'));
+    root.appendChild(CV.table([
+      { key: 'number', label: '#' }, { key: 'name', label: 'Spieler', l: true }, { key: 'team', label: 'Team', fmt: function (v) { return v === 'home' ? 'Heim' : 'Gast'; } },
+      { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 0); } },
+      { key: 'grade', label: 'Note', fmt: function (v, r) { return [h('b', { text: CV.num(v, 1) }), r.prov ? h('span', { class: 'badge prov', text: 'vorläufig', style: 'margin-left:.4rem' }) : null]; } },
+      { key: 'pir', label: 'PIR' }, { key: 'eff', label: 'EFF' }, { key: 'gmsc', label: 'GmSc', fmt: function (v) { return CV.num(v, 1); } },
+      { key: 'pct', label: 'Perzentil', fmt: function (v) { return CV.pct(v); } }
+    ], rows, { sortKey: 'grade', empty: 'Noch keine Noten (Einsatzzeit fehlt).' }));
+  }
+
+  // ---- Shot Chart
+  function loadShots() {
+    if (!gid || !geo) return;
+    var q = [];
+    if ($('#sc-player').value) q.push('player_id=' + enc($('#sc-player').value));
+    if ($('#sc-team').value) q.push('team=' + $('#sc-team').value);
+    CV.api('/games/' + enc(gid) + '/shotchart' + (q.length ? '?' + q.join('&') : '')).then(function (d) {
+      var c = CV.courtSvg($('#court'), geo);
+      d.shots.forEach(function (s) {
+        var cls = s.team === 'away' ? 'away' : 'home';
+        var title = CV.s('title', null, (s.number !== null ? '#' + s.number + ' ' : '') + (s.value === 3 ? 'Dreier' : 'Zweier') + (s.made ? ' getroffen' : ' verfehlt'));
+        c.layer.appendChild(s.made
+          ? CV.s('circle', { class: 'made', cx: s.x, cy: -s.y, r: 0.32, style: 'fill:var(--' + cls + ')' }, title)
+          : CV.s('circle', { class: 'miss', cx: s.x, cy: -s.y, r: 0.3, style: 'stroke:var(--' + cls + ')' }, title));
+      });
+      var sm = d.summary, sum = CV.clear($('#sc-sum'));
+      [['Würfe', sm.fgm + '/' + sm.fga], ['Quote', CV.pct(sm.fg_pct)], ['Dreier', sm.fg3m + '/' + sm.fg3a]].forEach(function (x) { sum.appendChild(h('div', null, h('b', { text: x[1] }), h('span', { text: x[0] }))); });
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+  $('#sc-player').addEventListener('change', loadShots);
+  $('#sc-team').addEventListener('change', loadShots);
+
+  // ---- Highlights
+  function loadHighlights() {
+    if (!gid) return;
+    CV.api('/games/' + enc(gid) + '/highlights').then(function (d) {
+      $('#hl-note').textContent = 'Kanal „' + d.channel + '“: nur Szenen von Spielern mit Highlight-Einwilligung. Alle Clips tragen die Kennzeichnung „' + d.ai_label + '“.';
+      var rc = CV.clear($('#hl-recap'));
+      if (d.recap) rc.appendChild(h('div', { class: 'banner', style: 'border-color:var(--line);color:var(--ink)' }, h('b', { text: 'Zusammenfassung: ' }), d.recap.segments.length + ' Szenen, ' + Math.round(d.recap.duration) + ' s'));
+      var root = CV.clear($('#hl'));
+      root.appendChild(CV.table([
+        { key: 'score', label: 'Score', fmt: function (v) { return CV.num(v, 1); } },
+        { key: 'text', label: 'Szene', l: true },
+        { key: 'clip', label: 'Clip (Video)', sort: false },
+        { key: 'tags', label: '', sort: false, l: true }
+      ], d.candidates.map(function (c) {
+        return { score: c.score, text: c.text || c.type, clip: CV.fmtTs(c.clip_start) + ' – ' + CV.fmtTs(c.clip_end), tags: [c.clutch ? h('span', { class: 'badge', text: 'Crunchtime' }) : null, c.close_game ? h('span', { class: 'badge', text: 'enges Spiel', style: 'margin-left:.3rem' }) : null] };
+      }), { sortKey: 'score', empty: 'Keine freigegebenen Highlights.' }));
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+
+  function refresh() {
+    if (!gid) return;
+    CV.api('/games/' + enc(gid) + '/live').then(renderLive).catch(function (e) { CV.toast(e.message, true); });
+    CV.api('/games/' + enc(gid) + '/boxscore').then(function (b) { renderBox(b); if (tab === 'shots') loadShots(); }).catch(function (e) { CV.toast(e.message, true); });
+    if (tab === 'hl') loadHighlights();
+  }
+  function pick(id) {
+    gid = id;
+    if (liveH) liveH.close();
+    if (gid) liveH = CV.live(gid, refresh, { onStatus: setConn });
+  }
+  CV.api('/court/geometry').then(function (g) { geo = g; });
+  CV.gamePicker($('#game'), { onChange: pick });
+  show('box');
+})();
+</script>
+</body>
+</html>

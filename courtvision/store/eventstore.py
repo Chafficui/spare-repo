@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (game_id, seq)
 );
 CREATE INDEX IF NOT EXISTS events_game ON events (game_id, seq);
+CREATE TABLE IF NOT EXISTS docs (
+    kind TEXT NOT NULL,
+    id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
+);
 """
 
 
@@ -90,6 +96,27 @@ class EventStore:
     def roster(self, team_id: str) -> list[Player]:
         rows = self._conn.execute("SELECT data FROM players WHERE team_id=?", (team_id,))
         return sorted((Player.model_validate_json(r[0]) for r in rows), key=lambda p: p.number)
+
+    def list_venues(self) -> list[Venue]:
+        return [Venue.model_validate_json(r[0]) for r in self._conn.execute("SELECT data FROM venues")]
+
+    # ------------------------------------------------------------ documents
+    def put_doc(self, kind: str, id_: str, data) -> None:
+        """Beliebiges JSON-Dokument (Kalibrierung, Medien-URLs, Einwilligungs-Audit ...)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO docs (kind, id, data) VALUES (?, ?, ?) "
+                "ON CONFLICT(kind, id) DO UPDATE SET data=excluded.data",
+                (kind, id_, json.dumps(data)),
+            )
+            self._conn.commit()
+
+    def get_doc(self, kind: str, id_: str, default=None):
+        row = self._conn.execute("SELECT data FROM docs WHERE kind=? AND id=?", (kind, id_)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def list_docs(self, kind: str) -> dict:
+        return {r[0]: json.loads(r[1]) for r in self._conn.execute("SELECT id, data FROM docs WHERE kind=?", (kind,))}
 
     def put_game(self, g: Game) -> None:
         self._put("games", g)

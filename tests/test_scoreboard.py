@@ -381,3 +381,29 @@ def test_reconcile_with_scoresheet():
     evs = fu.reconcile_with_scoresheet(fu._state, 3, 0)
     assert len(evs) == 1 and evs[0].payload["kind"] == "scoreboard_mismatch"
     assert evs[0].payload["winner"] == "scoresheet"
+
+
+def test_fusion_ft_series_with_lagging_board_matches_fifo():
+    """3 Freiwürfe im Abstand ~3 s, Tafel zählt jeweils ~3.5 s verspätet hoch."""
+    from courtvision.domain.events import Event, EventType
+    from courtvision.scoreboard import ScoreboardFusion, ScoreboardReading
+    fus = ScoreboardFusion("g")
+    out = []
+    def board(ts, away):
+        out.extend(fus.on_reading(ScoreboardReading(video_ts=ts, home=10, away=away, clock=45.0,
+                                                    period=3, running=False, fouls_home=2, fouls_away=1)))
+    fts = []
+    board(0.0, 20)
+    for i, t in enumerate((2.0, 5.2, 8.6)):
+        ev = Event(game_id="g", type=EventType.FREE_THROW, video_ts=t, team="away", player_id="p",
+                   payload={"made": True, "attempt": i + 1, "of": 3})
+        fts.append(ev)
+        out.extend(fus.on_optical_event(ev))
+    for ts in range(1, 20):
+        away = 20 + sum(1 for t in (5.5, 8.7, 12.1) if ts >= t)
+        board(float(ts), away)
+    out.extend(fus.flush(20.0))
+    from courtvision.domain.events import effective_events
+    eff = [e for e in effective_events(fts + out) if e.type == EventType.FREE_THROW]
+    assert len(eff) == 3 and all(e.payload["made"] for e in eff)
+    assert all(e.player_id == "p" for e in eff)

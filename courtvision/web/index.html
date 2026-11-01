@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CourtVision – Basketball-Scouting</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <h1>CourtVision</h1>
+  <p class="muted">Automatisches Basketball-Scouting: ein Event-Log, sechs Oberflächen. Wähle oben deine Rolle (Platzhalter für das spätere Login).</p>
+
+  <div class="grid cols-3" id="surfaces"></div>
+
+  <section class="card" style="margin-top:16px">
+    <h2>Spiele</h2>
+    <div class="tablewrap"><table id="games"><thead><tr><th>Spiel</th><th>Liga</th><th>Beginn</th><th>Status</th><th class="l">Öffnen</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h;
+  CV.init({});
+  var surfaces = [
+    ['setup.html', 'Setup', 'Hallenwart · Tablet', 'Teams und Kader (CSV), Kamera kalibrieren, Aufstellung, Spielstart.'],
+    ['console.html', 'Live-Konsole', 'Kampfgericht · Tablet', 'Unsichere Ereignisse in Sekunden bestätigen, Fouls tippen, Spielbericht, Freigabe.'],
+    ['dashboard.html', 'Trainer-Dashboard', 'Trainer', 'Box-Score, Shot Chart, Lineups, Play-by-Play, Noten, Highlights.'],
+    ['game.html', 'Spielseite', 'Fans · öffentlich', 'Live-Score, Play-by-Play, Livestream, datenschutzkonformer Box-Score.'],
+    ['player.html', 'Spielerprofil', 'Spieler / Eltern', 'Eigene Stats, Notenverlauf, Radar, Highlights, Teilen, Einwilligungen.'],
+    ['verband.html', 'Verband / Liga', 'Verband', 'Bestenliste, CSV-Export, DSFA-Checkliste, Abrechnung.']
+  ];
+  var box = document.getElementById('surfaces');
+  surfaces.forEach(function (x) {
+    box.appendChild(h('a', { class: 'card', href: x[0], style: 'text-decoration:none;color:inherit' },
+      h('h2', { text: x[1] }), h('div', { class: 'badge', text: x[2] }), h('p', { class: 'muted', text: x[3] })));
+  });
+  CV.api('/games').then(function (games) {
+    var tb = document.querySelector('#games tbody');
+    if (!games.length) { tb.appendChild(h('tr', null, h('td', { colspan: 5, class: 'empty', text: 'Noch keine Spiele – lege im Setup eines an.' }))); return; }
+    games.forEach(function (g) {
+      var q = '?game=' + encodeURIComponent(g.id);
+      tb.appendChild(h('tr', null,
+        h('td', { class: 'l' }, h('b', { text: g.home_name }), ' – ', h('b', { text: g.away_name })),
+        h('td', { text: g.league || '–' }), h('td', { text: (g.start_time || '').slice(0, 16).replace('T', ' ') || '–' }),
+        h('td', null, h('span', { class: 'badge' + (g.status === 'live' ? ' live' : ''), text: CV.STATUS_DE[g.status] || g.status })),
+        h('td', { class: 'l' }, h('a', { href: 'game.html' + q, text: 'Spielseite' }), ' · ', h('a', { href: 'console.html' + q, text: 'Konsole' }), ' · ', h('a', { href: 'dashboard.html' + q, text: 'Dashboard' }))));
+    });
+  }).catch(function (e) { CV.toast(e.message, true); });
+})();
+</script>
+</body>
+</html>

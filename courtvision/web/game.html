@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spielseite – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <div class="row" style="margin-bottom:12px">
+    <div><label for="game">Spiel</label><select id="game"></select></div>
+    <div class="fit"><span id="conn" class="badge">offline</span></div>
+  </div>
+
+  <section class="card" aria-live="polite">
+    <div class="scorebug">
+      <div class="team home" id="home-name">Heim</div>
+      <div class="pts home" id="home-pts">0</div>
+      <div class="mid"><div class="clock" id="clock">--:--</div><div id="period" class="muted small"></div><div id="status"></div></div>
+      <div class="pts away" id="away-pts">0</div>
+      <div class="team away" id="away-name">Gast</div>
+    </div>
+    <p class="center muted small" id="fouls"></p>
+  </section>
+
+  <div class="grid cols-2" style="margin-top:16px">
+    <section class="card">
+      <h2>Play-by-Play</h2>
+      <ul class="feed" id="feed"><li class="empty">Noch keine Ereignisse.</li></ul>
+    </section>
+    <section class="card">
+      <h2>Livestream</h2>
+      <div class="stream" id="stream">Wähle ein Spiel.</div>
+      <p class="muted small">Der Livestream wird nur angeboten, wenn alle Spieler beider Teams zugestimmt haben. Szenen werden mit „KI-generiert“ gekennzeichnet.</p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px">
+    <h2>Box-Score <span class="badge" id="boxbadge"></span></h2>
+    <p class="muted small" id="boxnote"></p>
+    <div id="box"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$, gid = null, liveH = null;
+  CV.init({});
+  function setConn(st) { var b = $('#conn'); b.textContent = st === 'open' ? 'Live-Verbindung' : 'getrennt'; b.className = 'badge' + (st === 'open' ? ' ok' : ''); }
+
+  function renderLive(d) {
+    $('#home-name').textContent = d.home.name; $('#away-name').textContent = d.away.name;
+    $('#home-pts').textContent = d.home.score; $('#away-pts').textContent = d.away.score;
+    $('#clock').textContent = d.clock_text || '--:--';
+    $('#period').textContent = d.period ? (d.period > 4 ? 'OT' + (d.period - 4) : 'Viertel ' + d.period) + (d.running ? '' : ' · Uhr steht') : '';
+    var st = $('#status'); CV.clear(st);
+    st.appendChild(h('span', { class: 'badge' + (d.status === 'live' ? ' live' : ''), text: CV.STATUS_DE[d.status] || d.status }));
+    if (d.box_status === 'provisional' && d.status !== 'scheduled') st.appendChild(h('span', { class: 'badge prov', text: 'vorläufig', style: 'margin-left:.3rem' }));
+    var f = d.team_fouls || {};
+    $('#fouls').textContent = (f.home !== null && f.home !== undefined) ? 'Teamfouls: ' + d.home.name + ' ' + f.home + ' · ' + d.away.name + ' ' + f.away : '';
+    var feed = $('#feed'); CV.clear(feed);
+    if (!d.playbyplay.length) feed.appendChild(h('li', { class: 'empty', text: 'Noch keine Ereignisse.' }));
+    d.playbyplay.forEach(function (i) {
+      feed.appendChild(h('li', null, i.text, i.provisional ? h('span', { class: 'badge prov', text: 'vorläufig', style: 'margin-left:.4rem' }) : null));
+    });
+    var sv = $('#stream'); CV.clear(sv);
+    if (d.livestream.allowed && d.livestream.url) sv.appendChild(h('div', null, 'Livestream-Player (Platzhalter)', h('br'), h('a', { href: d.livestream.url, target: '_blank', rel: 'noopener', text: d.livestream.url })));
+    else if (d.livestream.allowed) sv.textContent = 'Livestream-Player (Platzhalter) – noch keine Stream-URL hinterlegt.';
+    else sv.textContent = 'Kein Livestream: nicht alle Spieler haben der Übertragung zugestimmt.';
+  }
+
+  function renderBox(b) {
+    $('#boxbadge').textContent = b.status === 'final' ? 'final' : 'vorläufig';
+    $('#boxbadge').className = 'badge ' + (b.status === 'final' ? 'ok' : 'prov');
+    $('#boxnote').textContent = b.note || '';
+    var root = CV.clear($('#box'));
+    ['home', 'away'].forEach(function (side) {
+      var t = b[side];
+      var rows = b.players.filter(function (p) { return p.team === side; }).map(function (p) {
+        return { number: p.number, name: p.name, minutes: p.minutes, pts: p.pts, reb: p.reb, ast: p.ast, stl: p.stl, blk: p.blk, tov: p.tov, pf: p.pf,
+          fg: p.fgm + '/' + p.fga, fg3: p.fg3m + '/' + p.fg3a, ft: p.ftm + '/' + p.fta, grade: p.rating ? p.rating.grade : null, prov: p.rating && p.rating.provisional };
+      });
+      var tot = t.totals;
+      var cols = [
+        { key: 'number', label: '#' }, { key: 'name', label: 'Spieler', l: true }, { key: 'minutes', label: 'Min', fmt: function (v) { return CV.num(v, 0); } },
+        { key: 'pts', label: 'PKT' }, { key: 'reb', label: 'REB' }, { key: 'ast', label: 'AST' }, { key: 'stl', label: 'STL' }, { key: 'blk', label: 'BLK' },
+        { key: 'tov', label: 'TO' }, { key: 'pf', label: 'PF' }, { key: 'fg', label: 'FG', sort: false }, { key: 'fg3', label: '3P', sort: false }, { key: 'ft', label: 'FW', sort: false },
+        { key: 'grade', label: 'Note', fmt: function (v, r) { return v === null || v === undefined ? '–' : [CV.num(v, 1), r.prov ? h('span', { class: 'badge prov', text: 'vorl.', style: 'margin-left:.3rem' }) : null]; } }
+      ];
+      rows.push({ _cls: 'total', number: '', name: 'Team gesamt', minutes: null, pts: tot.pts, reb: tot.reb + t.team_rebounds, ast: tot.ast, stl: tot.stl, blk: tot.blk, tov: tot.tov, pf: tot.pf,
+        fg: tot.fgm + '/' + tot.fga, fg3: tot.fg3m + '/' + tot.fg3a, ft: tot.ftm + '/' + tot.fta, grade: null });
+      root.appendChild(h('h3', { class: side, text: t.name + ' – ' + t.points }));
+      root.appendChild(CV.table(cols, rows, { sortKey: 'number', sortDir: 1 }));
+    });
+  }
+
+  function refresh() {
+    if (!gid) return;
+    CV.api('/games/' + encodeURIComponent(gid) + '/live').then(renderLive).catch(function (e) { CV.toast(e.message, true); });
+    CV.api('/games/' + encodeURIComponent(gid) + '/boxscore').then(renderBox).catch(function () { /* ignorieren */ });
+  }
+  function pick(id) {
+    gid = id;
+    if (liveH) liveH.close();
+    if (gid) liveH = CV.live(gid, refresh, { onStatus: setConn });
+  }
+  CV.gamePicker($('#game'), { onChange: pick });
+})();
+</script>
+</body>
+</html>

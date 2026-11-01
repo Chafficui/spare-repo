@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live-Konsole – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <div class="row" style="margin-bottom:12px">
+    <div><label for="game">Spiel</label><select id="game"></select></div>
+    <div class="fit"><span id="conn" class="badge">offline</span></div>
+  </div>
+
+  <section class="card" aria-live="polite">
+    <div class="scorebug">
+      <div class="team home" id="home-name">Heim</div>
+      <div class="pts home" id="home-pts">0</div>
+      <div class="mid"><div class="clock" id="clock">--:--</div><div id="period" class="muted small"></div></div>
+      <div class="pts away" id="away-pts">0</div>
+      <div class="team away" id="away-name">Gast</div>
+    </div>
+    <p class="center muted" id="fouls" style="margin:.6rem 0 0"></p>
+  </section>
+
+  <section class="card" style="margin-top:16px" aria-labelledby="h-review">
+    <h2 id="h-review">Zu prüfen <span class="badge prov" id="rv-count">0</span></h2>
+    <p class="muted small">Sortiert nach Einfluss auf den Box-Score. Der Clip (5 s) zeigt die Szene; tippe Bestätigen, einen Vorschlag oder Verwerfen.</p>
+    <div class="review" id="review"><div class="empty">Alles geprüft.</div></div>
+  </section>
+
+  <section class="card" style="margin-top:16px" aria-labelledby="h-foul">
+    <h2 id="h-foul">Fouls erfassen</h2>
+    <div class="tabs" role="group" aria-label="Foulart" id="kinds"></div>
+    <div class="grid cols-2" id="foul-teams"></div>
+  </section>
+
+  <div class="grid cols-2" style="margin-top:16px">
+    <section class="card" aria-labelledby="h-sheet">
+      <h2 id="h-sheet">Spielberichtsbogen abgleichen</h2>
+      <p class="muted small">Werte vom offiziellen Bogen eintragen (Vorbelegung = automatische Zählung). Abweichungen erscheinen als Hinweise in der Liste und blockieren die Freigabe.</p>
+      <div id="sheet"></div>
+      <div style="margin-top:.8rem"><button id="sheet-go" class="primary">Bogen übernehmen</button></div>
+      <div id="sheet-out" class="small" style="margin-top:.6rem"></div>
+    </section>
+    <section class="card" aria-labelledby="h-fin">
+      <h2 id="h-fin">Freigabe</h2>
+      <p class="muted small">Gibt den Box-Score frei (Status „final“). Offene Unsicherheiten unter Konfidenz 0,5 oder Bogen-Abweichungen blockieren die Freigabe.</p>
+      <label for="fin-by">Freigegeben von</label><input id="fin-by" placeholder="Name Kampfgericht">
+      <label style="display:flex;gap:.5rem;align-items:center;color:var(--ink)"><input type="checkbox" id="fin-force"> Trotz offener Punkte erzwingen</label>
+      <div style="margin-top:.8rem"><button id="fin-go" class="primary lg">Spiel freigeben</button></div>
+    </section>
+  </div>
+</main>
+<script src="app.js"></script>
+<script>
+(function () {
+  var h = CV.h, $ = CV.$, gid = null, liveH = null, kind = 'personal', lastBox = null, sheetDirty = false;
+  CV.init({ roles: ['kampfgericht', 'trainer'] });
+  var KINDS = [['personal', 'Persönlich'], ['offensive', 'Offensiv'], ['technical', 'Technisch'], ['unsportsmanlike', 'Unsportlich'], ['disqualifying', 'Disqualifizierend']];
+  function enc(x) { return encodeURIComponent(x); }
+  function setConn(st) { var b = $('#conn'); b.textContent = st === 'open' ? 'Live-Verbindung' : 'getrennt'; b.className = 'badge' + (st === 'open' ? ' ok' : ''); }
+
+  var kb = $('#kinds');
+  KINDS.forEach(function (k) {
+    var b = h('button', { class: 'chip', type: 'button', 'aria-pressed': k[0] === kind, text: k[1], onclick: function () {
+      kind = k[0]; kb.querySelectorAll('button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); });
+    } });
+    kb.appendChild(b);
+  });
+
+  function renderLive(d) {
+    $('#home-name').textContent = d.home.name; $('#away-name').textContent = d.away.name;
+    $('#home-pts').textContent = d.home.score; $('#away-pts').textContent = d.away.score;
+    $('#clock').textContent = d.clock_text || '--:--';
+    $('#period').textContent = (d.period ? (d.period > 4 ? 'OT' + (d.period - 4) : 'Viertel ' + d.period) : '') + (d.score_mismatch ? ' · Tafel ≠ Zählung' : '');
+    var f = d.team_fouls || {};
+    $('#fouls').textContent = 'Teamfouls: ' + d.home.name + ' ' + (f.home === null ? '–' : f.home) + ' · ' + d.away.name + ' ' + (f.away === null ? '–' : f.away);
+  }
+
+  function clip(item) {
+    var box = h('div', { class: 'video' });
+    if (item.video_url) {
+      var v = h('video', { controls: true, preload: 'metadata', src: item.video_url + '#t=' + item.clip_start.toFixed(1) + ',' + item.clip_end.toFixed(1) });
+      box.appendChild(v);
+    } else {
+      box.appendChild(h('div', null, 'Video-Player (Platzhalter)', h('br'), 'Clip ' + CV.fmtTs(item.clip_start) + ' – ' + CV.fmtTs(item.clip_end) + ' (' + item.clip_seconds.toFixed(0) + ' s)'));
+    }
+    return box;
+  }
+
+  function act(item, body, done) {
+    CV.tryApi('/games/' + enc(gid) + '/review/' + enc(item.event_id), { json: body }).then(function (r) {
+      if (r) { CV.toast(body.action === 'reject' ? 'Verworfen' : 'Gespeichert · noch ' + r.remaining + ' offen'); loadReview(); refresh(); }
+    });
+  }
+
+  function loadReview() {
+    if (!gid) return;
+    CV.api('/games/' + enc(gid) + '/review').then(function (rv) {
+      $('#rv-count').textContent = rv.count;
+      var box = CV.clear($('#review'));
+      if (!rv.items.length) { box.appendChild(h('div', { class: 'empty', text: 'Alles geprüft – nichts zu tun.' })); return; }
+      rv.items.forEach(function (it) {
+        var actions = h('div', { class: 'actions' },
+          h('button', { class: 'good lg', onclick: function () { act(it, { action: 'confirm' }); }, text: '✓ Bestätigen' }),
+          it.suggestions.map(function (s) { return h('button', { class: 'lg', onclick: function () { act(it, { action: 'suggestion', suggestion_index: s.index }); }, text: s.action === 'void' ? s.label : '→ ' + s.label }); }),
+          h('button', { class: 'danger lg', onclick: function () { act(it, { action: 'reject' }); }, text: '✕ Verwerfen' }));
+        box.appendChild(h('div', { class: 'item' },
+          h('h3', null, h('span', { class: it.team === 'away' ? 'away' : (it.team === 'home' ? 'home' : '') , text: it.text }), ' ', it.reason === 'flag' ? h('span', { class: 'badge prov', text: 'Hinweis' }) : null),
+          h('div', { class: 'small muted' }, 'Konfidenz ' + Math.round(it.confidence * 100) + ' % · Einfluss ' + it.impact.toFixed(1)),
+          h('div', { class: 'conf', title: 'Konfidenz' }, h('i', { style: 'width:' + Math.round(it.confidence * 100) + '%' })),
+          clip(it), actions));
+      });
+    }).catch(function (e) { CV.toast(e.message, true); });
+  }
+
+  function renderFouls(box) {
+    lastBox = box;
+    var root = CV.clear($('#foul-teams'));
+    ['home', 'away'].forEach(function (side) {
+      var grid = h('div', { class: 'players' });
+      box.players.filter(function (p) { return p.team === side; }).sort(function (a, b) { return a.number - b.number; }).forEach(function (p) {
+        grid.appendChild(h('button', { class: 'lg', type: 'button', title: p.name, onclick: function () { foul(p); } },
+          h('span', { class: 'n', text: '#' + p.number }), h('span', { class: 'small', text: (p.name || '').split(' ').slice(-1)[0] }), h('span', { class: 'pf', text: p.pf + ' Fouls' })));
+      });
+      root.appendChild(h('div', null, h('h3', { class: side, text: box[side].name }), grid));
+    });
+    renderSheet(box);
+  }
+  function foul(p) {
+    CV.tryApi('/games/' + enc(gid) + '/fouls', { json: { player_id: p.player_id, kind: kind } }).then(function (r) {
+      if (r) { CV.toast('Foul #' + p.number + ' ' + (p.name || '') + ' (' + r.player_fouls + ')'); refresh(); }
+    });
+  }
+
+  $('#sheet').addEventListener('input', function () { sheetDirty = true; });
+  function renderSheet(box) {
+    if (sheetDirty) return;
+    var root = CV.clear($('#sheet'));
+    var rows = [];
+    box.players.sort(function (a, b) { return a.team === b.team ? a.number - b.number : (a.team === 'home' ? -1 : 1); }).forEach(function (p) {
+      rows.push(h('tr', null, h('td', { class: 'l', text: '#' + p.number + ' ' + (p.name || '') }),
+        ['pts', 'pf', 'ftm'].map(function (f) { return h('td', null, h('input', { type: 'number', min: 0, value: p[f], 'data-pid': p.player_id, 'data-f': f, style: 'width:4.5rem;min-height:36px' })); })));
+    });
+    root.appendChild(h('div', { class: 'tablewrap' }, h('table', null, h('thead', null, h('tr', null, h('th', { class: 'l', text: 'Spieler' }), h('th', { text: 'Punkte' }), h('th', { text: 'Fouls' }), h('th', { text: 'FW get.' }))), h('tbody', null, rows))));
+    root.appendChild(h('div', { class: 'row', style: 'margin-top:.6rem' },
+      h('div', null, h('label', { for: 'sh-home', text: 'Endstand Heim' }), h('input', { id: 'sh-home', type: 'number', min: 0, value: box.score.home })),
+      h('div', null, h('label', { for: 'sh-away', text: 'Endstand Gast' }), h('input', { id: 'sh-away', type: 'number', min: 0, value: box.score.away }))));
+  }
+  $('#sheet-go').addEventListener('click', function () {
+    var players = {};
+    document.querySelectorAll('#sheet input[data-pid]').forEach(function (i) {
+      var p = players[i.getAttribute('data-pid')] = players[i.getAttribute('data-pid')] || {};
+      p[i.getAttribute('data-f') === 'pts' ? 'points' : (i.getAttribute('data-f') === 'pf' ? 'fouls' : 'ftm')] = parseInt(i.value || '0', 10);
+    });
+    CV.tryApi('/games/' + enc(gid) + '/scoresheet', { json: { players: players, home: parseInt($('#sh-home').value || '0', 10), away: parseInt($('#sh-away').value || '0', 10) } }).then(function (r) {
+      if (!r) return;
+      sheetDirty = false;
+      var out = CV.clear($('#sheet-out'));
+      out.appendChild(h('b', { class: r.mismatches ? 'away' : '', text: r.mismatches ? r.mismatches + ' Abweichung(en)' : 'Bogen stimmt überein' }));
+      out.appendChild(h('ul', null, r.flags.map(function (f) { return h('li', { text: f.payload.message }); })));
+      loadReview();
+    });
+  });
+
+  $('#fin-go').addEventListener('click', function () {
+    if (!gid) return;
+    CV.tryApi('/games/' + enc(gid) + '/finalize', { json: { by: $('#fin-by').value, force: $('#fin-force').checked } }).then(function (r) {
+      if (r) { CV.toast('Spiel freigegeben'); refresh(); }
+    });
+  });
+
+  function refresh() {
+    if (!gid) return;
+    CV.api('/games/' + enc(gid) + '/live').then(renderLive).catch(function (e) { CV.toast(e.message, true); });
+    CV.api('/games/' + enc(gid) + '/boxscore').then(renderFouls).catch(function () { /* ignorieren */ });
+    loadReview();
+  }
+  function pick(id) {
+    gid = id;
+    if (liveH) liveH.close();
+    if (gid) liveH = CV.live(gid, refresh, { onStatus: setConn });
+  }
+  CV.gamePicker($('#game'), { onChange: pick });
+})();
+</script>
+</body>
+</html>

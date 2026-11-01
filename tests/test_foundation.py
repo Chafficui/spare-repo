@@ -54,3 +54,15 @@ def test_event_sourcing_and_store():
     p = Player(id="p", team_id="t", number=1, name="n", consent=int(Consent.OBJECTED | Consent.HIGHLIGHTS))
     assert not p.has(Consent.HIGHLIGHTS)
     assert game_seconds(2, 300) == 900 and game_seconds(5, 0) == 2700
+
+
+def test_store_documents_and_venues():
+    from courtvision.domain.models import Venue
+    s = EventStore()
+    s.put_doc("calibration", "g1", {"err": 0.5})
+    s.put_doc("calibration", "g1", {"err": 0.4})
+    assert s.get_doc("calibration", "g1") == {"err": 0.4}
+    assert s.get_doc("calibration", "x", {}) == {}
+    assert s.list_docs("calibration") == {"g1": {"err": 0.4}}
+    s.put_venue(Venue(id="v", name="Halle"))
+    assert [v.id for v in s.list_venues()] == ["v"]

@@ -166,7 +166,11 @@ class ScoreboardFusion:
             if not lo <= e.video_ts <= hi:
                 continue
             exact = part == 1 or e.payload.get("value") == part
-            key = (not exact, abs(e.video_ts - ts))
+            # Tafeländerungen kommen in Reihenfolge der Treffer (mit Verzögerung):
+            # unter den Treffern vor der Änderung den ältesten unbestätigten
+            # nehmen (FIFO, z. B. Freiwurfserien), sonst den nächsten danach.
+            after = e.video_ts > ts
+            key = (not exact, after, e.video_ts - ts if after else e.video_ts)
             if best is None or key < best[0]:
                 best = (key, r, exact)
         return None if best is None else (best[1], best[2])

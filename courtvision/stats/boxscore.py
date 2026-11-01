@@ -154,6 +154,28 @@ class BoxScore(BaseModel):
 _END_TYPES = (EventType.PERIOD_END, EventType.GAME_END)
 
 
+def _with_offensive_foul_turnovers(evs: list[Event], window_s: float = 3.0) -> list[Event]:
+    """Offensivfoul = Turnover (Ereignisregeln). Fouls kommen von Konsole/Bogen;
+    fehlt ein passender TURNOVER(kind=offensive_foul) desselben Spielers im
+    Zeitfenster, wird er für die Projektion ergänzt (nicht ins Log geschrieben)."""
+    tos = [e for e in evs if e.type == EventType.TURNOVER and e.payload.get("kind") == "offensive_foul"]
+    extra = []
+    for f in evs:
+        if f.type != EventType.FOUL or f.payload.get("kind") != "offensive" or not f.team:
+            continue
+        if any(t.player_id == f.player_id and abs(t.video_ts - f.video_ts) <= window_s for t in tos):
+            continue
+        extra.append(Event(game_id=f.game_id, id=f"{f.id}-to", type=EventType.TURNOVER, video_ts=f.video_ts,
+                           seq=f.seq, period=f.period, clock=f.clock, team=f.team, player_id=f.player_id,
+                           payload={"kind": "offensive_foul", "derived_from": f.id},
+                           confidence=f.confidence, source=f.source, status=f.status))
+    if not extra:
+        return evs
+    out = evs + extra
+    out.sort(key=lambda e: (e.video_ts, e.seq))
+    return out
+
+
 def compute_boxscore(
     events: list[Event],
     game: Game,
@@ -161,7 +183,7 @@ def compute_boxscore(
     provisional_threshold: float = 0.8,
 ) -> BoxScore:
     """Berechnet den Box-Score aus den Events (siehe Modul-Docstring)."""
-    evs = effective_events(events)
+    evs = _with_offensive_foul_turnovers(effective_events(events))
     teams: dict[Side, TeamLine] = {s: TeamLine(side=s) for s in SIDES}
     lines: dict[str, PlayerLine] = {}
     side_of: dict[str, Side] = {}
@@ -335,9 +357,12 @@ def compute_boxscore(
         elif t == EventType.POSSESSION and pl is not None:
             pl.possession_s += max(0.0, float(pay.get("end_ts", 0)) - float(pay.get("start_ts", 0)))
         elif t == EventType.SCOREBOARD:
-            scoreboard = {"home": int(pay.get("home", 0)), "away": int(pay.get("away", 0))}
+            # Unvollständige Tafel-Lesungen (home/away None) ignorieren
+            if pay.get("home") is not None and pay.get("away") is not None:
+                scoreboard = {"home": int(pay["home"]), "away": int(pay["away"])}
         elif t == EventType.SCORESHEET:
-            scoresheet = {"home": int(pay.get("home", 0)), "away": int(pay.get("away", 0))}
+            if pay.get("home") is not None and pay.get("away") is not None:
+                scoresheet = {"home": int(pay["home"]), "away": int(pay["away"])}
         elif t == EventType.GAME_FINALIZED:
             finalized = True
 
