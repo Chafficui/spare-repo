@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>Anmeldung – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-brand">
+      <a class="brand" href="index.html">Court<b>Vision</b></a>
+      <div class="sub">Anmeldung mit Codai ID</div>
+      <span class="codai-note"><i aria-hidden="true"></i> Die Anmeldung läuft über <b>Codai ID</b></span>
+    </div>
+
+    <div id="msg" class="banner bad hidden" role="alert" aria-live="assertive"></div>
+    <div id="info" class="banner info hidden" role="status" aria-live="polite"></div>
+
+    <!-- Schon angemeldet -->
+    <section id="step-done" class="hidden">
+      <h1>Du bist angemeldet</h1>
+      <p class="muted" id="done-who"></p>
+      <div class="stack">
+        <a class="btn primary" id="done-next" href="index.html">Weiter</a>
+        <div class="alt"><button class="link" type="button" id="done-logout">Abmelden</button></div>
+      </div>
+    </section>
+
+    <!-- Schritt 1: E-Mail -->
+    <section id="step-email">
+      <form id="email-form" novalidate>
+        <h1>Willkommen zurück</h1>
+        <p class="muted lead">Gib deine E-Mail-Adresse ein. Wir schicken dir einen 6-stelligen Code – ein Passwort brauchst du nicht.</p>
+        <label for="email">E-Mail-Adresse</label>
+        <input id="email" name="email" type="email" inputmode="email" autocomplete="email username" autocapitalize="none" spellcheck="false" required placeholder="name@beispiel.de">
+        <button class="primary" type="submit" id="email-go">Weiter</button>
+        <div class="alt">
+          <button class="link" type="button" id="to-password">Mit Passwort anmelden</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Schritt 2: Code -->
+    <section id="step-code" class="hidden">
+      <form id="code-form" novalidate>
+        <h1>Code eingeben</h1>
+        <p class="lead">Wir haben einen 6-stelligen Code an <strong id="sent-to"></strong> geschickt.</p>
+        <label for="code">6-stelliger Code</label>
+        <input id="code" class="codeinput" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="14" pattern="[0-9 ]*" aria-describedby="code-hint" placeholder="······">
+        <p class="hint" id="code-hint">Keine E-Mail da? Schau auch im Spam-Ordner nach. Der Code ist 10 Minuten gültig.</p>
+        <button class="primary" type="submit" id="code-go">Anmelden</button>
+        <div class="alt">
+          <button class="link" type="button" id="resend" disabled>Code erneut senden</button>
+          <button class="link" type="button" id="other-email">Andere E-Mail verwenden</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Alternative: Passwort -->
+    <section id="step-password" class="hidden">
+      <form id="pw-form" novalidate>
+        <h1>Mit Passwort anmelden</h1>
+        <label for="pw-email">E-Mail-Adresse</label>
+        <input id="pw-email" name="username" type="email" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <label for="pw">Passwort</label>
+        <input id="pw" name="password" type="password" autocomplete="current-password" required>
+        <button class="primary" type="submit" id="pw-go">Anmelden</button>
+        <div class="alt">
+          <a class="link" id="forgot" href="#" target="_blank" rel="noopener">Passwort vergessen?</a>
+          <button class="link" type="button" id="to-code">Stattdessen Code per E-Mail</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div id="demo" class="demo-box hidden">
+    <b>Demo-Anmeldung.</b> Der Code erscheint in der Server-Konsole statt in einer E-Mail. Schnellauswahl:
+    <div class="chips" id="demo-chips"></div>
+  </div>
+
+  <p class="login-foot">Dein Passwort und deine Codes gehen nur an Codai ID und werden bei CourtVision nicht gespeichert.
+    Konto und Passwort verwaltest du bei <a id="account" href="#" target="_blank" rel="noopener">Codai ID</a>.</p>
+</div>
+<script src="app.js"></script>
+<script src="login.js"></script>
+</body>
+</html>

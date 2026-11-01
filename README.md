@@ -61,11 +61,11 @@ Python 3.13.
 
 ```bash
 pip install -r requirements.txt            # numpy, scipy, pydantic, fastapi, uvicorn, websockets, httpx, pytest
-python -m pytest -q tests                  # 221 Tests
+python -m pytest -q tests                  # 249 Tests
 
 python -m courtvision.cli demo [--db spiel.sqlite] [--seed 1] [--no-frames] [--noise]   # Demo-Spiel simulieren, Box-Score ausgeben
 python -m courtvision.cli benchmark --seeds 1 2 3 --frames                              # Genauigkeit gegen die Plan-Ziele
-python -m courtvision.cli serve --demo [--db demo.sqlite] [--port 8000]                 # API + Web-UI mit Demo-Daten
+python -m courtvision.cli serve --demo [--db demo.sqlite] [--port 8000]                 # API + Web-UI mit Demo-Daten und Fake-Codai (Anmeldung, s. u.)
 python -m courtvision.cli gst-pipeline --camera rtsp://...                              # GStreamer-Kommando des Edge-Rechners ausgeben
 ```
 
@@ -73,17 +73,20 @@ python -m courtvision.cli gst-pipeline --camera rtsp://...                      
 `--db`-Datei bleiben unberührt) und gibt die URLs aller Seiten aus. Ohne `--db` liegt alles im Speicher (oder in
 `$COURTVISION_DB`). `uvicorn courtvision.api.app:app` startet die App ebenfalls direkt.
 
-**Demo ansehen:** In der Kopfzeile die Rolle *admin* wählen; auf der Übersicht (`/index.html`) erscheint bei geplanten Spielen
-der Button **„Demo-Spiel simulieren“** (Echtzeitfaktor 20, ca. 3 Minuten für ein volles Spiel) – Spielseite, Konsole
-und Dashboard laufen per WebSocket live mit. Alternativ per curl:
+**Demo ansehen:** `serve --demo` läuft im Auth-Modus `codai` mit einem **Fake-Codai** (siehe [Anmeldung](#anmeldung-codai-id)):
+unter `/login.html` mit `admin@demo.courtvision.local` anmelden (der 6-stellige Code steht in der Server-Konsole; die
+Schnellauswahl auf der Anmeldeseite füllt die Demo-Adressen ein). Auf der Übersicht (`/index.html`) erscheint bei geplanten
+Spielen der Button **„Demo-Spiel simulieren“** (Echtzeitfaktor 20, ca. 3 Minuten für ein volles Spiel) – Spielseite,
+Konsole und Dashboard laufen per WebSocket live mit. Für Skripte ohne Browser: `--auth-mode dev` (oder
+`COURTVISION_AUTH_MODE=dev`) schaltet die Platzhalter-Header wieder ein:
 
 ```bash
+python -m courtvision.cli serve --demo --auth-mode dev --port 8000
 curl -X POST -H "X-Role: admin" -H "Content-Type: application/json" \
      -d '{"seed": 1, "include_frames": false, "speed": null}' http://127.0.0.1:8000/games/demo-game-1/simulate
 ```
 
-`speed: null` simuliert synchron (Antwort enthält den Endstand), eine Zahl > 0 spielt in einem Hintergrund-Thread mit diesem
-Echtzeitfaktor ab (`GET /games/{id}/simulate` zeigt den Fortschritt). Optional `periods`, `period_length_s`.
+`speed: null` simuliert synchron (Antwort enthält den Endstand), eine Zahl > 0 spielt in einem Hintergrund-Thread mit diesem Echtzeitfaktor ab (`GET /games/{id}/simulate` zeigt den Fortschritt). Optional `periods`, `period_length_s`.
 Die Wahrheits-Fouls des Simulators werden als Konsolen-Fouls zu ihren Zeitstempeln eingespeist. Simuliert werden können nur
 geplante Spiele.
 
@@ -106,9 +109,9 @@ scheduled --POST /start--> live --POST /end--> processing --POST /processed--> r
 
 ## Rollen und Oberflächen
 
-Die Rolle kommt aus dem Header `X-Role` (optional `X-Team-Id`, `X-Player-Id`; bei WebSockets als Query-Parameter).
-**Das ist ein Platzhalter ohne Authentifizierung** – jeder Client kann sich jede Rolle geben. Vor einem echten Betrieb muss
-`courtvision/api/auth.py` durch Login (z. B. OIDC/JWT) ersetzt werden.
+Die Rolle eines Benutzers vergibt CourtVision selbst (Mitgliedschaften, s. [Anmeldung](#anmeldung-codai-id)); wer nicht angemeldet
+ist, sieht die öffentlichen Seiten als `fan`. Die Platzhalter-Header `X-Role`/`X-Team-Id`/`X-Player-Id` gibt es nur noch
+im Entwicklungsmodus (`COURTVISION_AUTH_MODE=dev`, so laufen die Tests).
 
 | Rolle | Oberfläche | Aufgaben |
 |---|---|---|
@@ -119,10 +122,105 @@ Die Rolle kommt aus dem Header `X-Role` (optional `X-Team-Id`, `X-Player-Id`; be
 | `fan` (Standard) | `game.html` | Live-Score, Play-by-Play, Livestream, datenschutzkonformer Box-Score |
 | `verband` | `verband.html` | Bestenliste, CSV-Export, DSFA-Checkliste, Abrechnung |
 | `system` | – | Edge-/Cloud-Pipeline: Beobachtungen, Tafelwerte, optische Events |
-| `admin` | `index.html` | darf alles, inkl. Demo-Simulation |
+| `admin` | `index.html`, `admin.html` | darf alles, inkl. Demo-Simulation und Benutzerverwaltung |
 
 Sichtbarkeit richtet sich nach der Einwilligung je Spieler (`courtvision/api/visibility.py`): Widerspruch → Overlay/Text
 ohne Namen, keine Highlights, Statistik nur als Team-Wert; Minderjährige brauchen Eltern- (ab 14 auch eigene) Einwilligung.
+
+## Anmeldung (Codai ID)
+
+CourtVision hat eine **eigene Anmeldeseite** (`login.html`), die echte Anmeldung übernimmt aber **Codai ID** (`CodaiApp/auth`, „Headless
+sign-in“). Codai beantwortet nur *wer* sich anmeldet (`subject`, `username`, optional `email`); *was* die Person darf, entscheidet CourtVision.
+
+```
+ Browser  --/auth/* (Cookie cv_session, X-CSRF-Token)-->  CourtVision (BFF)  --Bearer-Service-Token-->  Codai ID
+ (login.html)                                             Sitzungen, Rollen,   POST /service/login/code/start|verify
+                                                          Rate-Limits          POST /service/login/password
+```
+
+* **BFF, nur Server-zu-Server:** Der Browser spricht nie mit Codai und sieht weder das Service-Token noch das Codai-`flow`.
+  `courtvision/auth/codai.py` (`CodaiClient`) reicht IP (`X-Forwarded-For` nur mit `COURTVISION_TRUST_PROXY=1`), User-Agent und eine
+  Geräte-ID (Cookie `cv_device`) des Nutzers an Codai weiter und bildet alle Codai-Fehler (`bad_email`, `rate_limited`, `mail_failed`,
+  `bad_code` mit `attemptsLeft`, `expired`, `bad_credentials`, `busy`/`unavailable`, `forbidden`/`unauthorized`) auf typisierte Ausnahmen und
+  deutsche Meldungen ab.
+* **Ablauf Code-Login:** E-Mail → `POST /auth/code/start` → Code per Mail → `POST /auth/code/verify` → Sitzung. Der Codai-Flow liegt
+  serverseitig (`docs`-Art `loginflow`) hinter dem signierten, kurzlebigen Cookie `cv_login` (10 min, HttpOnly): ein anderer
+  Browser kann den Code nicht einlösen. **Passwort-Login** (`POST /auth/password`): bei unbekanntem Gerät verlangt Codai zusätzlich
+  einen Mail-Code („Step-up“); die Oberfläche zeigt dann den Code-Schritt. Passkeys werden nicht unterstützt (siehe unten).
+* **Sitzungen:** serverseitig im Store (`docs`-Art `session`, abgelegt wird nur `sha256(id)`), 256-Bit-ID im Cookie `cv_session`
+  (HttpOnly, `SameSite=Lax`, `Secure`, Pfad `/`), 12 h gleitend / 30 d absolut, Logout löscht sie.
+* **CSRF:** Double-Submit-Token (Cookie `cv_csrf` + Header `X-CSRF-Token`), HMAC-signiert und an die Sitzung gebunden; geprüft für alle
+  zustandsändernden Anfragen mit Cookies und für `/auth/*`. Zusätzlich wird `Origin` gegen `Host` geprüft. Bearer-Clients sind
+  ausgenommen. Die Login-Endpunkte haben pro IP/E-Mail eigene Limits (im Speicher) zusätzlich zu denen von Codai.
+* **Maschinen-Clients** (Edge/CV-Pipeline, Rolle `system`): `Authorization: Bearer <Token>` mit einem Token aus
+  `COURTVISION_SYSTEM_TOKENS` (Vergleich in konstanter Zeit, mind. 16 Zeichen), z. B. für `POST /games/{id}/observations`. Kein CSRF nötig.
+* **WebSocket:** authentifiziert sich im Codai-Modus über das Sitzungs-Cookie (bzw. Bearer-Header); Rollen-Query-Parameter werden ignoriert,
+  fremde `Origin`s abgelehnt.
+* **Nicht angemeldet:** öffentlicher `fan` für öffentliche Seiten/Endpunkte, `401` für geschützte (angemeldet ohne Berechtigung: `403`);
+  `app.js` leitet auf `login.html?next=…` um.
+
+### Benutzer und Rollen
+
+Nutzer-Datensätze (`docs`-Art `user`): `subject`, `username`, `email?`, `memberships`, `created_at`, `last_login`. Eine **Mitgliedschaft** ist
+`{role, team_id?, player_id?}` (`trainer` braucht ein Team, `spieler` einen Spieler; `hallenwart`, `kampfgericht`, `verband`, `admin` keins).
+Wer keine hat, ist `fan`. Mehrere Mitgliedschaften sind möglich; die **aktive Rolle** wählt man im Benutzermenü (Sitzung) oder je Anfrage mit
+`X-Active-Role` (+ `X-Active-Team`/`X-Active-Player`) – der Server prüft sie gegen die Mitgliedschaften, der Client kann keine fremde
+Rolle, kein fremdes Team und keinen fremden Spieler behaupten.
+
+* **Admins** werden über `COURTVISION_ADMINS` (Codai-Subjects und/oder E-Mails, kommagetrennt) bestimmt, weitere vergibt ein Admin.
+* **Verwaltung:** `admin.html` bzw. `GET /admin/users`, `PUT /admin/users/{subject}/memberships`, `POST /admin/invites`
+  (`{email, memberships}`), `DELETE /admin/invites/{email}`. Eine **Einladung per E-Mail** merkt Rollen für eine Adresse vor und wendet sie
+  beim ersten Login an (bei bereits bekannten Benutzern sofort). Das setzt eine *bekannte* Adresse voraus: entweder liefert Codai sie
+  (`EMAIL_CLAIM_SERVICES`) oder – Standard – die beim Login getippte Adresse gilt als bestätigt, weil der Code an sie ging bzw. das Passwort zu ihr
+  gehört. Mit `COURTVISION_TRUST_TYPED_EMAIL=0` greifen ohne Codai-Adresse nur Zuweisungen über das `subject`.
+
+### Umgebungsvariablen
+
+| Variable | Bedeutung |
+|---|---|
+| `COURTVISION_AUTH_MODE` | `codai` (Standard) oder `dev` (Platzhalter-Header `X-Role` – **nur Entwicklung/Tests**) |
+| `CODAI_AUTH_URL` | Basis-URL von Codai ID (Standard `https://auth.codai.app`); auch Ziel der Links „Passwort vergessen?“ (`/password?reset=1`) und „Konto verwalten“ (`/account`) |
+| `CODAI_SERVICE_TOKEN` | Bearer-Token dieses Dienstes bei Codai (mind. 32 Zeichen; **geheim**, nur auf dem Server). Fehlt es, antworten die Login-Endpunkte mit 503 |
+| `CODAI_CLIENT_ID` | optional: Hydra-Client-ID, die Codai als `client` für den Namen in der Code-Mail bekommt |
+| `COURTVISION_ADMINS` | kommagetrennte Codai-Subjects und/oder E-Mails mit Admin-Rolle |
+| `COURTVISION_SYSTEM_TOKENS` | kommagetrennte Bearer-Tokens für Maschinen-Clients (Rolle `system`) |
+| `COURTVISION_SECRET` | Signaturschlüssel für `cv_login`/`cv_csrf`; ohne Angabe wird einer im Store erzeugt (bei mehreren Instanzen mit getrennten Stores setzen) |
+| `COURTVISION_TRUST_PROXY` | `1`: `X-Forwarded-For` und `X-Forwarded-Host` auswerten; `COURTVISION_PROXY_HOPS` (Standard 1) = Anzahl vertrauter Proxys (von rechts gezählt) |
+| `COURTVISION_INSECURE_COOKIES` | `1`: Cookies ohne `Secure` (nur für lokales `http://`) |
+| `COURTVISION_TRUST_TYPED_EMAIL` | `0`: getippte E-Mail nicht als bestätigt behandeln (Standard `1`) |
+| `COURTVISION_DEMO_CODE` | nur `serve --demo`: fester Code statt zufälliger |
+
+### Was der Codai-Betreiber einrichten muss
+
+Im Codai-Dienst (`CodaiApp/auth`):
+
+1. Einen Dienstnamen wählen, z. B. `courtvision`, und ihn in `SERVICE_TOKENS` eintragen (`courtvision=<sha256-Hex des Tokens>`; das Klartext-Token
+   – mind. 32 Zeichen – kommt als `CODAI_SERVICE_TOKEN` zu CourtVision).
+2. Denselben Namen in `HEADLESS_LOGIN_SERVICES` aufnehmen (sonst `403 forbidden`); produktiv braucht Codai dafür `RESEND_API_KEY`.
+3. Optional in `EMAIL_CLAIM_SERVICES`, damit Codai die bestätigte Adresse mitliefert (Einladungen und `COURTVISION_ADMINS` per E-Mail arbeiten dann auf Codais
+   Adresse statt der getippten).
+4. Optional einen Hydra-Client registrieren (`scripts/clients.ts`) und dessen ID als `CODAI_CLIENT_ID` setzen, damit die Code-Mail „CourtVision“ nennt
+   (sonst steht der Dienstname dort).
+
+### Entwicklung und Demo ohne Codai
+
+* `courtvision/auth/fake_codai.py` bildet die Headless-Endpunkte samt Fehlersemantik nach (Limits, 5 Fehlversuche, 10 min, Step-up, E-Mail-Claim). Die
+  Codes stehen im Log; **nie im offenen Netz betreiben**. Einbindung im Prozess (`create_app(store, fake_codai=FakeCodai(...))`, gemountet unter
+  `/_fake_codai`) oder eigenständig: `python -m courtvision.auth.fake_codai --port 4460` und `CODAI_AUTH_URL=http://127.0.0.1:4460`
+  mit `CODAI_SERVICE_TOKEN` aus der Ausgabe.
+* `python -m courtvision.cli serve --demo` nutzt standardmäßig den Codai-Modus mit eingehängtem Fake-Codai und druckt eine Warnung sowie die Codes in die
+  Konsole. Demo-Adressen (alle `@demo.courtvision.local`): `admin@` (Admin, auch Passwort `demo-passwort`), `hallenwart@`, `kampfgericht@`,
+  `trainer.heim@`, `trainer.gast@`, `spieler@`, `verband@`, `mehrfach@` (Trainer + Kampfgericht + Spieler, zum Rollenwechsel); jede andere Adresse ist Fan.
+  Für lokales `http://` `COURTVISION_INSECURE_COOKIES=1` setzen. `--codai-url URL` verwendet ein echtes Codai (Token aus `CODAI_SERVICE_TOKEN`),
+  `--auth-mode dev` die Platzhalter-Header.
+* Screenshots der Oberflächen (angemeldet über die echte Oberfläche) liegen in `docs/screenshots/`.
+
+### Grenzen
+
+* **Passkeys** (Codai: `/service/passkey/*`) werden nicht angebunden: WebAuthn ist an die Relying-Party-Domain `codai.app` gebunden; für CourtVision
+  auf einer anderen Domain wären Related Origin Requests und `PASSKEY_SERVICE_ORIGINS` auf Codai-Seite nötig.
+* Die älteren Seiten (`dashboard.html` usw.) enthalten noch Inline-Skripte; eine strenge CSP (kein `unsafe-inline`) gilt daher nur für `login.html` und `admin.html`.
+* Die Rate-Limits der Anmeldung liegen pro Prozess im Speicher; mehrere Instanzen teilen Sitzungen und Login-Flows über den Store, Limits nicht.
 
 ## Benchmark
 

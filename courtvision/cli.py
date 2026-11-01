@@ -56,26 +56,36 @@ def _cmd_benchmark(a: argparse.Namespace) -> int:
     return 0 if res["all_passed"] else 1
 
 
-DEMO_PAGES = (("index.html", "Uebersicht (Rolle waehlen, Demo-Spiel simulieren: Rolle admin)"),
+DEMO_PAGES = (("index.html", "Uebersicht (Demo-Spiel simulieren: Rolle admin)"),
               ("setup.html", "Setup (Hallenwart)"), ("console.html", "Live-Konsole (Kampfgericht)"),
               ("dashboard.html", "Trainer-Dashboard"), ("game.html", "Spielseite (Fans)"),
-              ("player.html", "Spielerprofil"), ("verband.html", "Verband / Liga"))
+              ("player.html", "Spielerprofil"), ("verband.html", "Verband / Liga"),
+              ("admin.html", "Benutzerverwaltung (Admin)"))
 
 
 def _cmd_serve(a: argparse.Namespace) -> int:
+    import logging
     import os
 
     import uvicorn  # lazy: nur fuer den Server noetig
 
+    from .auth.config import AuthConfig
     from .store.eventstore import EventStore
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     db = a.db or os.environ.get("COURTVISION_DB", ":memory:")
     if a.reload and db == ":memory:":
         print("Fehler: --reload braucht --db <Datei> (sonst verwirft jeder Reload den Speicher)", file=sys.stderr)
         return 2
     store = EventStore(db)
+    cfg = AuthConfig.from_env()
+    if a.auth_mode:
+        cfg = cfg.with_(mode=a.auth_mode)
+    fake = None
     game_id = None
     if a.demo:
+        from .auth.demo import DEMO_ADMIN, demo_config, make_demo_codai, seed_demo_invites
         from .sim import demo_setup, load_demo
 
         setup = demo_setup()
@@ -85,22 +95,52 @@ def _cmd_serve(a: argparse.Namespace) -> int:
             print(f"Demo-Daten geladen: {setup.home.name} gegen {setup.away.name} ({game_id}), db={db}")
         else:
             print(f"Demo-Daten bereits vorhanden ({game_id}), db={db}")
+        if cfg.is_dev:
+            print("Auth-Modus dev: Rollenwahl per Platzhalter-Header (nur Entwicklung).")
+        else:
+            if a.codai_url:
+                cfg = demo_config(cfg.with_(codai_url=a.codai_url.rstrip("/")), fake_url=False)
+                if not cfg.service_token:
+                    print("Warnung: --codai-url ohne CODAI_SERVICE_TOKEN -- Anmeldung nicht moeglich.", file=sys.stderr)
+            else:
+                fake = make_demo_codai(fixed_code=os.environ.get("COURTVISION_DEMO_CODE") or None, announce=print)
+                cfg = demo_config(cfg)
+                print("=" * 78)
+                print("WARNUNG: Demo-Anmeldung mit FAKE-Codai (/_fake_codai). Jede E-Mail-Adresse darf sich anmelden;")
+                print("         der 6-stellige Code steht hier in der Konsole statt in einer E-Mail. Nicht ins Netz stellen!")
+                if a.host not in ("127.0.0.1", "localhost", "::1"):
+                    print(f"         ACHTUNG: Server lauscht auf {a.host}, nicht nur lokal.")
+                print(f"  Admin: {DEMO_ADMIN}  (Code oder Passwort 'demo-passwort')")
+                print("  weitere Demo-Rollen: hallenwart@ / kampfgericht@ / trainer.heim@ / trainer.gast@ / spieler@ /")
+                print("                       verband@ / mehrfach@ + @demo.courtvision.local; jede andere Adresse = Fan")
+                print("=" * 78)
+            seed_demo_invites(store, setup, cfg)
+    if not cfg.is_dev and fake is None and not cfg.service_token:
+        print("Warnung: CODAI_SERVICE_TOKEN fehlt -- die Anmeldung per Codai ID antwortet mit 503 "
+              "(Maschinen-Clients mit COURTVISION_SYSTEM_TOKENS funktionieren).", file=sys.stderr)
+    if not cfg.is_dev and not cfg.insecure_cookies and a.host in ("127.0.0.1", "localhost", "::1"):
+        print("Hinweis: Cookies sind 'Secure'. Fuer lokales http://localhost COURTVISION_INSECURE_COOKIES=1 setzen.")
     base = f"http://{a.host}:{a.port}"
     print(f"CourtVision laeuft auf {base}")
+    print(f"  Anmeldung: {base}/login.html   (Auth-Modus {cfg.mode})")
     for page, label in DEMO_PAGES:
         q = f"?game={game_id}" if game_id and page != "index.html" else ""
         print(f"  {base}/{page}{q}   {label}")
     print(f"  API-Doku: {base}/docs")
     if a.demo:
-        print(f"Demo: als admin 'curl -X POST -H \"X-Role: admin\" -H \"Content-Type: application/json\" "
-              f"-d '{{\"seed\":1,\"speed\":20}}' {base}/games/{game_id}/simulate' oder Button auf der Uebersicht.")
+        print("Demo: als Admin anmelden, dann auf der Uebersicht 'Demo-Spiel simulieren' (oder POST "
+              f"{base}/games/{game_id}/simulate mit CSRF-Header bzw. im Dev-Modus mit X-Role: admin).")
+    if a.reload and fake is not None:
+        print("Fehler: --reload geht nicht mit dem Fake-Codai der Demo (--codai-url oder --auth-mode dev nutzen)",
+              file=sys.stderr)
+        return 2
     if a.reload:
         os.environ["COURTVISION_DB"] = db
         uvicorn.run("courtvision.api.app:app", host=a.host, port=a.port, reload=True)
     else:
         from .api.app import create_app
 
-        uvicorn.run(create_app(store), host=a.host, port=a.port)
+        uvicorn.run(create_app(store, auth_config=cfg, fake_codai=fake), host=a.host, port=a.port)
     return 0
 
 
@@ -147,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reload", action="store_true")
     s.add_argument("--db", default=None, help="SQLite-Datei (Default: $COURTVISION_DB oder Speicher)")
     s.add_argument("--demo", action="store_true", help="Demo-Stammdaten laden (Teams, Kader, Spiel demo-game-1)")
+    s.add_argument("--codai-url", default=None,
+                   help="mit --demo: echtes Codai statt Fake nutzen (Token aus $CODAI_SERVICE_TOKEN)")
+    s.add_argument("--auth-mode", choices=["codai", "dev"], default=None,
+                   help="Standard: $COURTVISION_AUTH_MODE oder codai; dev = Platzhalter-Header X-Role (nur Entwicklung)")
     s.set_defaults(fn=_cmd_serve)
 
     g = sub.add_parser("gst-pipeline", help="GStreamer-Pipeline des Edge-Rechners ausgeben")

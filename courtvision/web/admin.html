@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benutzer – CourtVision</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="cv-top"></div>
+<main>
+  <h1>Benutzer und Rollen</h1>
+  <p class="muted">Codai ID sagt nur, <em>wer</em> sich anmeldet. Hier legst du fest, <em>was</em> die Person in CourtVision darf.
+    Wer keine Rolle hat, ist Fan (öffentliche Sicht). Mehrere Rollen sind möglich – die Person wechselt sie im Benutzermenü.</p>
+
+  <section class="card">
+    <h2>Angemeldete Benutzer</h2>
+    <div class="tablewrap"><table id="users">
+      <thead><tr><th class="l">Benutzer</th><th class="l">E-Mail</th><th>Letzte Anmeldung</th><th class="l">Rollen</th><th class="l">Aktion</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div id="editor-host"></div>
+  </section>
+
+  <section class="card mt" id="invite-card">
+    <h2>Per E-Mail einladen</h2>
+    <p class="muted small" id="invite-note">Rollen für eine E-Mail-Adresse vormerken; sie greifen bei der ersten Anmeldung mit dieser Adresse.</p>
+    <label for="inv-email">E-Mail-Adresse</label>
+    <input id="inv-email" type="email" autocomplete="off" placeholder="trainerin@verein.de">
+    <div id="inv-editor"></div>
+    <p><button class="primary" type="button" id="inv-go">Einladung speichern</button></p>
+    <h3>Offene Einladungen</h3>
+    <div class="tablewrap"><table id="invites">
+      <thead><tr><th class="l">E-Mail</th><th class="l">Rollen</th><th class="l">Aktion</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+</main>
+<script src="app.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

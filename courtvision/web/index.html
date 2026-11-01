@@ -10,7 +10,7 @@
 <div id="cv-top"></div>
 <main>
   <h1>CourtVision</h1>
-  <p class="muted">Automatisches Basketball-Scouting: ein Event-Log, sechs Oberflächen. Wähle oben deine Rolle (Platzhalter für das spätere Login).</p>
+  <p class="muted">Automatisches Basketball-Scouting: ein Event-Log, sechs Oberflächen. <span id="role-hint">Melde dich oben rechts mit deiner Codai ID an – welche Oberflächen du bedienen darfst, hängt von deiner Rolle ab; ohne Anmeldung siehst du die öffentliche Spielseite.</span></p>
 
   <div class="grid cols-3" id="surfaces"></div>
 
@@ -24,6 +24,7 @@
 (function () {
   var h = CV.h;
   CV.init({});
+  if (CV.mode() === 'dev') document.getElementById('role-hint').textContent = 'Entwicklungsmodus: Wähle oben deine Rolle (Platzhalter ohne Login).';
   var surfaces = [
     ['setup.html', 'Setup', 'Hallenwart · Tablet', 'Teams und Kader (CSV), Kamera kalibrieren, Aufstellung, Spielstart.'],
     ['console.html', 'Live-Konsole', 'Kampfgericht · Tablet', 'Unsichere Ereignisse in Sekunden bestätigen, Fouls tippen, Spielbericht, Freigabe.'],

@@ -47,6 +47,16 @@ class EventStore:
         self._lock = threading.RLock()
         self._listeners: list[Listener] = []
 
+    def _all(self, sql: str, args: tuple = ()) -> list:
+        """Lesezugriffe unter der Sperre: eine SQLite-Verbindung ist nicht fuer gleichzeitige Cursor mehrerer Threads
+        gedacht (``InterfaceError: bad parameter or other API misuse``, z. B. Polling waehrend eine Simulation schreibt)."""
+        with self._lock:
+            return self._conn.execute(sql, args).fetchall()
+
+    def _one(self, sql: str, args: tuple = ()):
+        with self._lock:
+            return self._conn.execute(sql, args).fetchone()
+
     # ------------------------------------------------------------ listeners
     def subscribe(self, fn: Listener) -> Callable[[], None]:
         self._listeners.append(fn)
@@ -69,7 +79,7 @@ class EventStore:
             self._conn.commit()
 
     def _get(self, table: str, model, id_: str):
-        row = self._conn.execute(f"SELECT data FROM {table} WHERE id=?", (id_,)).fetchone()
+        row = self._one(f"SELECT data FROM {table} WHERE id=?", (id_,))
         return model.model_validate_json(row[0]) if row else None
 
     def put_venue(self, v: Venue) -> None:
@@ -85,7 +95,7 @@ class EventStore:
         return self._get("teams", Team, id_)
 
     def list_teams(self) -> list[Team]:
-        return [Team.model_validate_json(r[0]) for r in self._conn.execute("SELECT data FROM teams")]
+        return [Team.model_validate_json(r[0]) for r in self._all("SELECT data FROM teams")]
 
     def put_player(self, p: Player) -> None:
         self._put("players", p, {"team_id": p.team_id})
@@ -94,11 +104,11 @@ class EventStore:
         return self._get("players", Player, id_)
 
     def roster(self, team_id: str) -> list[Player]:
-        rows = self._conn.execute("SELECT data FROM players WHERE team_id=?", (team_id,))
+        rows = self._all("SELECT data FROM players WHERE team_id=?", (team_id,))
         return sorted((Player.model_validate_json(r[0]) for r in rows), key=lambda p: p.number)
 
     def list_venues(self) -> list[Venue]:
-        return [Venue.model_validate_json(r[0]) for r in self._conn.execute("SELECT data FROM venues")]
+        return [Venue.model_validate_json(r[0]) for r in self._all("SELECT data FROM venues")]
 
     # ------------------------------------------------------------ documents
     def put_doc(self, kind: str, id_: str, data) -> None:
@@ -112,11 +122,17 @@ class EventStore:
             self._conn.commit()
 
     def get_doc(self, kind: str, id_: str, default=None):
-        row = self._conn.execute("SELECT data FROM docs WHERE kind=? AND id=?", (kind, id_)).fetchone()
+        row = self._one("SELECT data FROM docs WHERE kind=? AND id=?", (kind, id_))
         return json.loads(row[0]) if row else default
 
+    def delete_doc(self, kind: str, id_: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM docs WHERE kind=? AND id=?", (kind, id_))
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def list_docs(self, kind: str) -> dict:
-        return {r[0]: json.loads(r[1]) for r in self._conn.execute("SELECT id, data FROM docs WHERE kind=?", (kind,))}
+        return {r[0]: json.loads(r[1]) for r in self._all("SELECT id, data FROM docs WHERE kind=?", (kind,))}
 
     def put_game(self, g: Game) -> None:
         self._put("games", g)
@@ -125,7 +141,7 @@ class EventStore:
         return self._get("games", Game, id_)
 
     def list_games(self) -> list[Game]:
-        return [Game.model_validate_json(r[0]) for r in self._conn.execute("SELECT data FROM games")]
+        return [Game.model_validate_json(r[0]) for r in self._all("SELECT data FROM games")]
 
     def set_game_status(self, id_: str, status: GameStatus) -> Game:
         g = self.get_game(id_)
@@ -164,10 +180,10 @@ class EventStore:
             q += " AND type=?"
             args.append(type_.value)
         q += " ORDER BY seq"
-        return [Event.model_validate_json(r[0]) for r in self._conn.execute(q, args)]
+        return [Event.model_validate_json(r[0]) for r in self._all(q, tuple(args))]
 
     def get_event(self, id_: str) -> Optional[Event]:
-        row = self._conn.execute("SELECT data FROM events WHERE id=?", (id_,)).fetchone()
+        row = self._one("SELECT data FROM events WHERE id=?", (id_,))
         return Event.model_validate_json(row[0]) if row else None
 
     def effective(self, game_id: str) -> list[Event]:

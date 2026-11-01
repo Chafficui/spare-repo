@@ -1,6 +1,8 @@
-/* CourtVision Web-UI: gemeinsame Helfer (fetch, WebSocket, Rollenwahl, SVG). Kein Build, keine externen Abhängigkeiten.
+/* CourtVision Web-UI: gemeinsame Helfer (fetch, WebSocket, Anmeldung/Rollen, SVG). Kein Build, keine externen Abhängigkeiten.
  *
- * WICHTIG: Die Rolle (X-Role) ist ein Platzhalter für echtes Login -- siehe courtvision/api/auth.py. */
+ * Anmeldung: Im Modus "codai" (Standard) kommt die Identität aus dem Sitzungs-Cookie (Login über Codai ID, login.html);
+ * die Kopfzeile zeigt das Benutzermenü. Nur im Modus "dev" (COURTVISION_AUTH_MODE=dev) gibt es die alte Rollenwahl mit
+ * dem Platzhalter-Header X-Role -- siehe courtvision/api/auth.py. */
 (function () {
   'use strict';
 
@@ -24,9 +26,33 @@
     try { window.localStorage.setItem(k, v); } catch (e) { /* ignorieren */ }
   }
 
-  function role() { return lsGet('cv.role', 'fan'); }
-  function teamId() { return lsGet('cv.team', ''); }
-  function playerId() { return lsGet('cv.player', ''); }
+  // ---- Anmeldung: /auth/me einmal synchron laden, damit role()/teamId() beim Seitenstart schon stimmen
+  var AUTH = { mode: 'dev', me: { authenticated: false, role: 'fan', memberships: [] } };
+  (function loadMe() {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('GET', '/auth/me', false);
+      x.send();
+      if (x.status === 200) {
+        var m = JSON.parse(x.responseText);
+        if (m && m.mode) { AUTH.mode = m.mode; AUTH.me = m; }
+      }
+    } catch (e) { /* alter Server ohne /auth: Dev-Verhalten */ }
+  })();
+  function isCodai() { return AUTH.mode === 'codai'; }
+  function protectedPage() { return !!AUTH.protectedPage; }
+  function cookie(name) {
+    var m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  function loginUrl() {
+    var next = location.pathname.split('/').pop() + location.search;
+    return 'login.html?next=' + encodeURIComponent(next);
+  }
+
+  function role() { return isCodai() ? (AUTH.me.role || 'fan') : lsGet('cv.role', 'fan'); }
+  function teamId() { return isCodai() ? (AUTH.me.team_id || '') : lsGet('cv.team', ''); }
+  function playerId() { return isCodai() ? (AUTH.me.player_id || '') : lsGet('cv.player', ''); }
 
   // ---- DOM
   function h(tag, attrs) {
@@ -77,29 +103,38 @@
     if (!d) return '';
     if (typeof d === 'string') return d;
     if (Array.isArray(d)) return d.map(function (x) { return (x.loc ? x.loc.slice(1).join('.') + ': ' : '') + (x.msg || JSON.stringify(x)); }).join('; ');
-    if (d.message) return d.message + (d.errors ? ' (' + d.errors.map(function (e) { return 'Zeile ' + e.line + ': ' + e.message; }).join('; ') + ')' : '');
+    if (d.message && d.code === undefined) return d.message + (d.errors ? ' (' + d.errors.map(function (e) { return 'Zeile ' + e.line + ': ' + e.message; }).join('; ') + ')' : '');
+    if (d.message) return d.message;
     return JSON.stringify(d);
   }
 
-  function headers(extra) {
-    var hd = { 'X-Role': role() };
-    if (teamId()) hd['X-Team-Id'] = teamId();
-    if (playerId()) hd['X-Player-Id'] = playerId();
+  function headers(extra, method) {
+    var hd = {};
+    if (isCodai()) {
+      // Sitzungs-Cookie geht automatisch mit; zustandsändernde Anfragen brauchen das CSRF-Token (Double-Submit)
+      if (method && method !== 'GET' && method !== 'HEAD') hd['X-CSRF-Token'] = cookie('cv_csrf');
+    } else {
+      hd['X-Role'] = role();
+      if (teamId()) hd['X-Team-Id'] = teamId();
+      if (playerId()) hd['X-Player-Id'] = playerId();
+    }
     return Object.assign(hd, extra || {});
   }
 
   /** api(path, {method, json, body, contentType, raw}) -> JSON | Text; wirft ApiError mit deutscher Meldung. */
   function api(path, opts) {
     opts = opts || {};
-    var hd = headers(opts.headers);
+    var method = opts.method || (opts.body !== undefined || opts.json !== undefined ? 'POST' : 'GET');
+    var hd = headers(opts.headers, method);
     var body = opts.body;
     if (opts.json !== undefined) { body = JSON.stringify(opts.json); hd['Content-Type'] = 'application/json'; }
     if (opts.contentType) hd['Content-Type'] = opts.contentType;
-    return fetch(path, { method: opts.method || (body !== undefined ? 'POST' : 'GET'), headers: hd, body: body }).then(function (r) {
+    return fetch(path, { method: method, headers: hd, body: body, credentials: 'same-origin' }).then(function (r) {
       var ct = r.headers.get('content-type') || '';
       var p = ct.indexOf('json') >= 0 ? r.json() : r.text();
       return p.then(function (data) {
         if (!r.ok) {
+          if (r.status === 401 && isCodai() && protectedPage() && !opts.noRedirect) { location.href = loginUrl(); }
           var msg = detailText(data && data.detail !== undefined ? data.detail : data) || ('Fehler ' + r.status);
           throw new ApiError(r.status, msg, data);
         }
@@ -117,9 +152,13 @@
     o = o || {};
     var ws, closed = false, last = o.after || 0, timer = null, isOpen = false;
     function open() {
-      var q = new URLSearchParams({ role: role(), after_seq: String(last) });
-      if (teamId()) q.set('team_id', teamId());
-      if (playerId()) q.set('player_id', playerId());
+      // Codai-Modus: Identität kommt aus dem Sitzungs-Cookie, keine Rollen-Parameter
+      var q = new URLSearchParams({ after_seq: String(last) });
+      if (!isCodai()) {
+        q.set('role', role());
+        if (teamId()) q.set('team_id', teamId());
+        if (playerId()) q.set('player_id', playerId());
+      }
       var proto = location.protocol === 'https:' ? 'wss' : 'ws';
       try { ws = new WebSocket(proto + '://' + location.host + '/ws/games/' + encodeURIComponent(gameId) + '?' + q); }
       catch (e) { schedule(); return; }
@@ -166,39 +205,93 @@
   }
   var STATUS_DE = { scheduled: 'geplant', live: 'LIVE', processing: 'Verarbeitung', review: 'Korrektur', final: 'final' };
 
-  // ---- Kopfzeile + Rolle
+  // ---- Kopfzeile + Rolle / Benutzermenü
+  function switchRole(m) {
+    return api('/auth/role', { json: { role: m.role, team_id: m.team_id || null, player_id: m.player_id || null } })
+      .then(function () { location.reload(); })
+      .catch(function (e) { toast(e.message, true); });
+  }
+  function logout() {
+    return api('/auth/logout', { method: 'POST', json: {} }).then(function () { location.href = 'index.html'; })
+      .catch(function (e) { toast(e.message, true); });
+  }
+  function userMenu() {
+    var me = AUTH.me;
+    if (!me.authenticated) {
+      return h('a', { class: 'btn primary loginbtn', href: loginUrl(), text: 'Anmelden' });
+    }
+    var name = me.username || me.email || 'Konto';
+    var items = [h('div', { class: 'um-head' }, h('b', { text: name }), me.email && me.username ? h('span', { class: 'muted small', text: me.email }) : null)];
+    if (me.role !== 'system') {
+      items.push(h('div', { class: 'um-label', text: me.memberships.length > 1 ? 'Rolle wechseln' : 'Deine Rolle' }));
+      me.memberships.forEach(function (m) {
+        items.push(h('button', { class: 'um-role', type: 'button', 'aria-pressed': m.active ? 'true' : 'false', disabled: m.active || me.memberships.length < 2 ? true : null,
+          onclick: function () { switchRole(m); }, text: m.label }));
+      });
+    }
+    items.push(h('hr'));
+    items.push(h('a', { class: 'um-link', href: me.account_url || '#', target: '_blank', rel: 'noopener', text: 'Konto verwalten (Codai ID)' }));
+    items.push(h('button', { class: 'um-link', type: 'button', onclick: logout, text: 'Abmelden' }));
+    return h('details', { class: 'usermenu' },
+      h('summary', null, h('span', { class: 'avatar', 'aria-hidden': 'true', text: name.charAt(0).toUpperCase() }),
+        h('span', { class: 'um-name' }, h('b', { text: name }), h('span', { class: 'muted small', text: me.label || me.role }))),
+      h('div', { class: 'um-panel' }, items));
+  }
+
   function init(opts) {
     opts = opts || {};
+    var codai = isCodai();
+    var wants = opts.roles || null;
+    AUTH.protectedPage = !!wants;
+    if (codai && wants && !AUTH.me.authenticated) { location.replace(loginUrl()); return; }
     var top = $('#cv-top') || document.body.insertBefore(h('div', { id: 'cv-top' }), document.body.firstChild);
     clear(top);
     var page = location.pathname.split('/').pop() || 'index.html';
-    var sel = h('select', { id: 'cv-role', 'aria-label': 'Rolle', onchange: function () {
-      lsSet('cv.role', sel.value); location.reload();
-    } }, ROLES.map(function (r) { return h('option', { value: r[0], text: r[1] }); }));
-    sel.value = role();
-    var extra = null;
-    if (role() === 'trainer') {
-      extra = h('select', { id: 'cv-team', 'aria-label': 'Team', onchange: function () { lsSet('cv.team', extra.value); location.reload(); } },
-        h('option', { value: '', text: 'Team wählen' }));
-      api('/teams').then(function (ts) {
-        ts.forEach(function (t) { extra.appendChild(h('option', { value: t.id, text: t.name })); });
-        extra.value = teamId();
-      }).catch(function () { /* ignorieren */ });
-    } else if (role() === 'spieler') {
-      extra = h('input', { id: 'cv-player', placeholder: 'Spieler-ID', 'aria-label': 'Spieler-ID', value: playerId(),
-        onchange: function () { lsSet('cv.player', extra.value.trim()); location.reload(); } });
-    }
     top.className = 'topbar';
     top.appendChild(h('a', { class: 'brand', href: 'index.html' }, 'Court', h('b', { text: 'Vision' })));
-    top.appendChild(h('nav', { 'aria-label': 'Hauptnavigation' }, NAV.map(function (n) {
+    var nav = NAV.slice();
+    if (role() === 'admin') nav.push(['admin.html', 'Benutzer']);
+    top.appendChild(h('nav', { 'aria-label': 'Hauptnavigation' }, nav.map(function (n) {
       return h('a', { href: n[0], 'aria-current': n[0] === page ? 'page' : null, text: n[1] });
     })));
-    top.appendChild(h('div', { class: 'rolebox', title: 'Platzhalter für Login (X-Role-Header)' }, 'Rolle', sel, extra));
-    if (opts.roles && opts.roles.indexOf(role()) < 0) {
+    if (codai) {
+      top.appendChild(userMenu());
+    } else {
+      var sel = h('select', { id: 'cv-role', 'aria-label': 'Rolle', onchange: function () {
+        lsSet('cv.role', sel.value); location.reload();
+      } }, ROLES.map(function (r) { return h('option', { value: r[0], text: r[1] }); }));
+      sel.value = role();
+      var extra = null;
+      if (role() === 'trainer') {
+        extra = h('select', { id: 'cv-team', 'aria-label': 'Team', onchange: function () { lsSet('cv.team', extra.value); location.reload(); } },
+          h('option', { value: '', text: 'Team wählen' }));
+        api('/teams').then(function (ts) {
+          ts.forEach(function (t) { extra.appendChild(h('option', { value: t.id, text: t.name })); });
+          extra.value = teamId();
+        }).catch(function () { /* ignorieren */ });
+      } else if (role() === 'spieler') {
+        extra = h('input', { id: 'cv-player', placeholder: 'Spieler-ID', 'aria-label': 'Spieler-ID', value: playerId(),
+          onchange: function () { lsSet('cv.player', extra.value.trim()); location.reload(); } });
+      }
+      top.appendChild(h('div', { class: 'rolebox', title: 'Entwicklungsmodus: Platzhalter für Login (X-Role-Header)' }, 'Rolle (dev)', sel, extra));
+    }
+    if (wants && wants.indexOf(role()) < 0 && !(codai && role() === 'admin')) {
       var main = $('main');
-      if (main) main.insertBefore(h('div', { class: 'banner' },
-        'Diese Seite ist für ', opts.roles.join(' / '), ' gedacht (aktuell: ', role(), '). ',
-        h('button', { class: 'chip', onclick: function () { lsSet('cv.role', opts.roles[0]); location.reload(); }, text: 'Zu „' + opts.roles[0] + '“ wechseln' })), main.firstChild);
+      if (main) {
+        var alt = codai ? AUTH.me.memberships.filter(function (m) { return wants.indexOf(m.role) >= 0; })[0] : null;
+        var banner;
+        if (!codai) {
+          banner = h('div', { class: 'banner' }, 'Diese Seite ist für ', wants.join(' / '), ' gedacht (aktuell: ', role(), '). ',
+            h('button', { class: 'chip', onclick: function () { lsSet('cv.role', wants[0]); location.reload(); }, text: 'Zu „' + wants[0] + '“ wechseln' }));
+        } else if (alt) {
+          banner = h('div', { class: 'banner' }, 'Diese Seite ist für ', wants.join(' / '), ' gedacht (aktuell: ', AUTH.me.label || role(), '). ',
+            h('button', { class: 'chip', onclick: function () { switchRole(alt); }, text: 'Zu „' + alt.label + '“ wechseln' }));
+        } else {
+          banner = h('div', { class: 'banner bad' }, 'Für diese Seite fehlt dir die Berechtigung (nötig: ', wants.join(' / '),
+            '). Rollen vergibt ein Admin unter „Benutzer“.');
+        }
+        main.insertBefore(banner, main.firstChild);
+      }
     }
   }
 
@@ -311,7 +404,7 @@
   }
 
   window.CV = {
-    ROLES: ROLES, h: h, s: s, $: $, clear: clear, toast: toast, api: api, tryApi: tryApi, connect: connect, live: live,
+    ROLES: ROLES, mode: function () { return AUTH.mode; }, me: function () { return AUTH.me; }, logout: logout, h: h, s: s, $: $, clear: clear, toast: toast, api: api, tryApi: tryApi, connect: connect, live: live,
     role: role, teamId: teamId, playerId: playerId, lsGet: lsGet, lsSet: lsSet, init: init, qs: qs,
     gamePicker: gamePicker, courtSvg: courtSvg, sparkline: sparkline, radar: radar, table: table,
     clock: clock, num: num, pct: pct, fmtTs: fmtTs, STATUS_DE: STATUS_DE, headers: headers, ApiError: ApiError

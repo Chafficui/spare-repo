@@ -15,7 +15,7 @@ from ..highlights.overlay import name_allowed
 from ..privacy import livestream_allowed
 from ..scoreboard import ScoreboardReading
 from ..stats import game_score, grade_boxscore
-from .auth import Principal, current_principal, principal_from, require
+from .auth import Principal, current_principal, principal_from, require, resolve_principal
 from .schemas import EventIn, ScoreboardIn
 from .state import AppState, Subscriber
 from .text import Namer, fmt_clock, playbyplay
@@ -96,12 +96,19 @@ def build(st: AppState) -> APIRouter:
     @r.websocket("/ws/games/{game_id}")
     async def ws_game(ws: WebSocket, game_id: str, after_seq: int = 0, role: Optional[str] = None,
                       team_id: Optional[str] = None, player_id: Optional[str] = None):
-        """Live-Events. Rolle per Query (Browser koennen keine Header setzen) oder ``X-Role``-Header
-        -- gleicher Platzhalter wie in :mod:`courtvision.api.auth`."""
-        h = ws.headers
+        """Live-Events. Codai-Modus: Identitaet aus dem Sitzungs-Cookie (bzw. Bearer-Header), keine Rollen-Query.
+        Dev-Modus: Rolle per Query (Browser koennen keine Header setzen) oder ``X-Role``-Header (Platzhalter)."""
+        a = ws.app.state.auth
         try:
-            p = principal_from(role or h.get("x-role"), team_id or h.get("x-team-id"),
-                               player_id or h.get("x-player-id"))
+            if not a.same_origin(ws):  # Cross-Site-WebSocket-Hijacking
+                await ws.close(code=4403)
+                return
+            if a.cfg.is_dev and (role or ws.headers.get("x-role")) and ws.cookies.get("cv_session") is None:
+                h = ws.headers
+                p = principal_from(role or h.get("x-role"), team_id or h.get("x-team-id"),
+                                   player_id or h.get("x-player-id"))
+            else:
+                p = resolve_principal(ws)
         except HTTPException:
             await ws.close(code=4401)
             return
