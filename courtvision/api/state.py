@@ -14,7 +14,10 @@ from ..domain.events import Event, EventType
 from ..domain.models import Consent, Game, GameStatus, Player, Team
 from ..geometry.court import Calibration
 from ..privacy import ConsentManager, default_checklist
-from ..scoreboard import PlausibilityFilter, ScoreboardFusion
+from ..live import GameSession
+from ..privacy.consent import ConsentRecord
+from ..privacy.dpia_checklist import ItemStatus
+from ..scoreboard import PlausibilityFilter
 from ..stats import BoxScore, LeagueDistribution, PlayerLine, compute_boxscore, game_score, grade_boxscore, Grade
 from ..store.eventstore import EventStore
 from .csvio import age_from_birth_year, is_minor_by_year, parse_consent
@@ -53,10 +56,11 @@ class Hub:
 
 
 @dataclass
-class ScoreboardPipe:
-    filter: PlausibilityFilter
-    fusion: ScoreboardFusion
-    lock: threading.Lock = field(default_factory=threading.Lock)
+class LiveSlot:
+    """Die Live-Session eines Spiels samt Sperre (Scoreboard-/Beobachtungs-Ingest und Replay-Thread)."""
+    session: GameSession
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    simulation: Optional[dict[str, Any]] = None  # Zustand einer laufenden Demo-Simulation
 
 
 class AppState:
@@ -67,9 +71,8 @@ class AppState:
         self.cm = ConsentManager()
         self.dpia = default_checklist()
         self.n_stable = scoreboard_n_stable
-        self.calibrations: dict[str, dict[str, Any]] = {}
-        self.media: dict[str, dict[str, Optional[str]]] = {}
-        self._pipes: dict[str, ScoreboardPipe] = {}
+        self._slots: dict[str, LiveSlot] = {}
+        self._load_dpia()
         self._box_cache: dict[str, tuple[tuple, BoxScore]] = {}
         store.subscribe(self.hub.on_event)
 
@@ -117,13 +120,73 @@ class AppState:
         self._box_cache[game.id] = (key, box)
         return box
 
-    # ------------------------------------------------------- scoreboard pipe
-    def pipe(self, game_id: str) -> ScoreboardPipe:
+    # ------------------------------------------------------ persistente Docs
+    def calibration(self, game_id: str) -> Optional[dict[str, Any]]:
+        return self.store.get_doc("calibration", game_id)
+
+    def set_calibration(self, game_id: str, info: dict[str, Any]) -> None:
+        self.store.put_doc("calibration", game_id, info)
+
+    def media(self, game_id: str) -> dict[str, Optional[str]]:
+        return self.store.get_doc("media", game_id, {}) or {}
+
+    def update_media(self, game_id: str, fields: dict[str, Optional[str]]) -> dict[str, Optional[str]]:
         with self.lock:
-            if game_id not in self._pipes:
-                self._pipes[game_id] = ScoreboardPipe(PlausibilityFilter(n_stable=self.n_stable),
-                                                      ScoreboardFusion(game_id))
-            return self._pipes[game_id]
+            m = {**self.media(game_id), **fields}
+            self.store.put_doc("media", game_id, m)
+            return m
+
+    def _load_dpia(self) -> None:
+        for item_id, d in self.store.list_docs("dpia").items():
+            if item_id in self.dpia.items:
+                self.dpia.set_status(item_id, ItemStatus(d.get("status", "open")), d.get("owner", ""),
+                                     d.get("note", ""))
+
+    def set_dpia(self, item_id: str, status: ItemStatus, owner: str = "", note: str = "") -> None:
+        with self.lock:
+            it = self.dpia.set_status(item_id, status, owner, note)
+            self.store.put_doc("dpia", item_id, {"status": it.status.value, "owner": it.owner, "note": it.note})
+
+    # ----------------------------------------------------------- Live-Session
+    def slot(self, game_id: str, *, n_stable: Optional[int] = None, calibration: Any = None) -> LiveSlot:
+        """Die (lazy erzeugte) ``GameSession`` des Spiels. Nach einem Neustart wird sie aus dem Store neu
+        aufgebaut: Aufstellung aus den STARTERS-Events, Wechselzonen aus der gespeicherten Kalibrierung.
+        Zustaende von Engine/Fusion/Tracker (offene Wuerfe, Uhr ...) gehen dabei verloren."""
+        with self.lock:
+            slot = self._slots.get(game_id)
+            if slot is not None:
+                return slot
+            g = self.game(game_id)
+            if calibration is None:
+                cal = self.calibration(game_id)
+                if cal and cal.get("zones"):
+                    calibration = {k: [tuple(pt) for pt in v] for k, v in cal["zones"].items()}
+            sess = GameSession(self.store, g, self.rosters(g), calibration=calibration,
+                               plausibility=PlausibilityFilter(n_stable=n_stable or self.n_stable))
+            for e in self.store.effective(game_id):  # Aufstellung wiederherstellen (ohne neue Events)
+                if e.type == EventType.STARTERS and e.team and e.payload.get("players"):
+                    sess.engine.set_starters(e.team, list(e.payload["players"]))
+            for e in self.store.events(game_id):
+                sess.last_ts = max(sess.last_ts, e.video_ts)
+            self._slots[game_id] = slot = LiveSlot(sess)
+            return slot
+
+    def start_game(self, game: Game, starters: dict[str, list[str]], video_ts: float = 0.0, *,
+                   explicit_start: bool = True, n_stable: Optional[int] = None,
+                   calibration: Any = None) -> list[Event]:
+        """Spielstart: Session anlegen, STARTERS (+ optional GAME_START/PERIOD_START) schreiben, Status LIVE."""
+        with self.lock:
+            self._slots.pop(game.id, None)  # frische Session fuer ein neues Spiel
+            slot = self.slot(game.id, n_stable=n_stable, calibration=calibration)
+        sess = slot.session
+        with slot.lock:
+            out: list[Event] = []
+            if explicit_start:
+                out += sess.start(video_ts)
+            for side in ("home", "away"):
+                out += sess.set_starters(side, starters[side])
+            sess.game = self.store.set_game_status(game.id, GameStatus.LIVE)
+        return out
 
     # -------------------------------------------------------------- consent
     def ensure_registered(self, player_id: str) -> Player:
@@ -134,6 +197,7 @@ class AppState:
             p = self.player(player_id)
             orig = Consent(p.consent)
             self.cm.register(p)
+            self.cm.load_audit(player_id, [ConsentRecord(**d) for d in self.store.get_doc("consent_audit", player_id, [])])
             prof = self.cm._profiles[player_id]  # noqa: SLF001 (Wiederherstellung nach Neustart)
             if Consent.OBJECTED in orig:
                 if not p.is_minor:
@@ -150,6 +214,7 @@ class AppState:
     def persist_player(self, player_id: str) -> Player:
         p = self.cm.players[player_id]
         self.store.put_player(p)
+        self.store.put_doc("consent_audit", player_id, [r.model_dump() for r in self.cm.audit_trail(player_id)])
         return p
 
     def apply_roster_consent(self, player_id: str, raw: str, birth_year: Optional[int]) -> None:

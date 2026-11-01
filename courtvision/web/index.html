@@ -37,6 +37,13 @@
     box.appendChild(h('a', { class: 'card', href: x[0], style: 'text-decoration:none;color:inherit' },
       h('h2', { text: x[1] }), h('div', { class: 'badge', text: x[2] }), h('p', { class: 'muted', text: x[3] })));
   });
+  function simulate(g, btn) {
+    btn.disabled = true;
+    CV.api('/games/' + encodeURIComponent(g.id) + '/simulate', { json: { seed: 1, speed: 20 } }).then(function (r) {
+      CV.toast(r.message || 'Simulation gestartet');
+      setTimeout(function () { location.href = 'game.html?game=' + encodeURIComponent(g.id); }, 800);
+    }).catch(function (e) { btn.disabled = false; CV.toast(e.message, true); });
+  }
   CV.api('/games').then(function (games) {
     var tb = document.querySelector('#games tbody');
     if (!games.length) { tb.appendChild(h('tr', null, h('td', { colspan: 5, class: 'empty', text: 'Noch keine Spiele – lege im Setup eines an.' }))); return; }
@@ -46,7 +53,8 @@
         h('td', { class: 'l' }, h('b', { text: g.home_name }), ' – ', h('b', { text: g.away_name })),
         h('td', { text: g.league || '–' }), h('td', { text: (g.start_time || '').slice(0, 16).replace('T', ' ') || '–' }),
         h('td', null, h('span', { class: 'badge' + (g.status === 'live' ? ' live' : ''), text: CV.STATUS_DE[g.status] || g.status })),
-        h('td', { class: 'l' }, h('a', { href: 'game.html' + q, text: 'Spielseite' }), ' · ', h('a', { href: 'console.html' + q, text: 'Konsole' }), ' · ', h('a', { href: 'dashboard.html' + q, text: 'Dashboard' }))));
+        h('td', { class: 'l' }, h('a', { href: 'game.html' + q, text: 'Spielseite' }), ' · ', h('a', { href: 'console.html' + q, text: 'Konsole' }), ' · ', h('a', { href: 'dashboard.html' + q, text: 'Dashboard' }),
+          (CV.role() === 'admin' && g.status === 'scheduled') ? [' · ', h('button', { class: 'btn', type: 'button', text: 'Demo-Spiel simulieren', onclick: function (ev) { simulate(g, ev.target); } })] : null)));
     });
   }).catch(function (e) { CV.toast(e.message, true); });
 })();

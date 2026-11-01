@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 
 from ..domain.events import Event, EventSource, EventStatus, EventType, effective_events
 from ..domain.models import Game, GameStatus, Player
+from ..domain.serialize import observation_from_dict
 from ..highlights import (build_scenes, filter_publishable, live_clip, player_reel, recap, score_events)
 from ..highlights.clips import ClipPlan, player_allowed
 from ..highlights.overlay import name_allowed
@@ -86,10 +87,10 @@ def build(st: AppState) -> APIRouter:
         data.setdefault("status", EventStatus.CONFIRMED if human else EventStatus.PROVISIONAL)
         ev = store.append(Event(game_id=game_id, **data))
         derived: list[Event] = []
-        if ev.source == EventSource.OPTICAL:  # optische Events laufen durch die Tafel-Fusion
-            pipe = st.pipe(game_id)
-            with pipe.lock:
-                derived = [store.append(e) for e in pipe.fusion.on_optical_event(ev)]
+        if ev.source == EventSource.OPTICAL:  # optische Events laufen durch die Tafel-Fusion der Session
+            slot = st.slot(game_id)
+            with slot.lock:
+                derived = [store.append(e) for e in slot.session.fusion.on_optical_event(ev)]
         return {"event": ev.model_dump(mode="json"), "derived": [e.model_dump(mode="json") for e in derived]}
 
     @r.websocket("/ws/games/{game_id}")
@@ -161,24 +162,45 @@ def build(st: AppState) -> APIRouter:
     @r.post("/games/{game_id}/scoreboard")
     def post_scoreboard(game_id: str, body: ScoreboardIn,
                         _: Principal = Depends(require("kampfgericht", "hallenwart", "system"))):
-        """Anzeigetafel-Messwert: Plausibilitaetsfilter (mit Entprellung) -> Fusion -> Events."""
+        """Anzeigetafel-Messwert -> ``GameSession.feed_scoreboard``: Plausibilitaetsfilter (mit Entprellung),
+        Fusion (SCOREBOARD-Events, Bestaetigung optischer Wuerfe) und Perioden-Tracker
+        (GAME_START/PERIOD_START/PERIOD_END/GAME_END)."""
         g = st.game(game_id)
         if g.status == GameStatus.FINAL:
             raise HTTPException(409, FINAL_LOCK_MSG)
         reading = ScoreboardReading(**body.model_dump())
-        pipe = st.pipe(game_id)
-        with pipe.lock:
-            out = pipe.filter.update(reading)
-            events: list[Event] = []
-            # Erst fusionieren, wenn beide Spielstaende entprellt uebernommen sind (ein SCOREBOARD-Event
-            # ohne Punktestand wuerde die Box-Score-Projektion stoeren).
-            if out.reading is not None and "home" in pipe.filter.acc and "away" in pipe.filter.acc:
-                events = [store.append(e) for e in pipe.fusion.on_reading(out.reading)]
+        slot = st.slot(game_id)
+        with slot.lock:
+            events = slot.session.feed_scoreboard(reading)
+            out = slot.session.last_filter
         return {
-            "accepted": out.reading is not None, "changed": sorted(out.changed),
-            "anomalies": [vars(a) for a in out.anomalies],
+            "accepted": out is not None and out.reading is not None,
+            "changed": sorted(out.changed) if out is not None else [],
+            "anomalies": [vars(a) for a in out.anomalies] if out is not None else [],
             "events": [e.model_dump(mode="json") for e in events],
         }
+
+    @r.post("/games/{game_id}/observations")
+    def post_observations(game_id: str, body: list[dict[str, Any]],
+                          _: Principal = Depends(require("system"))):
+        """Beobachtungen der Edge-CV-Pipeline (``courtvision.domain.serialize``) -> ``GameSession.feed_observation``.
+
+        Body: JSON-Liste ``{"kind": "Possession"|"ShotRelease"|"RimMake"|"BallTouch"|"OutOfBounds"|
+        "Formation"|"ClockState"|"FrameState", ...Felder}`` in Zeitreihenfolge. Die Liste wird zuerst
+        vollstaendig validiert (422 mit Index), erst dann gespeist."""
+        g = st.game(game_id)
+        if g.status == GameStatus.FINAL:
+            raise HTTPException(409, FINAL_LOCK_MSG)
+        obs = []
+        for i, d in enumerate(body):
+            try:
+                obs.append(observation_from_dict(d))
+            except ValueError as e:
+                raise HTTPException(422, f"Beobachtung {i}: {e}")
+        slot = st.slot(game_id)
+        with slot.lock:
+            events = [e for o in obs for e in slot.session.feed_observation(o)]
+        return {"fed": len(obs), "events": [e.model_dump(mode="json") for e in events]}
 
     # ---------------------------------------------------------------- Live
     @r.get("/games/{game_id}/live")
@@ -208,7 +230,7 @@ def build(st: AppState) -> APIRouter:
                 tf = box.team(side).team_fouls_by_period  # type: ignore[arg-type]
                 fouls[side] = tf.get(period or 0, 0) if tf or period else 0
         allowed = livestream_allowed(g, pm.values())
-        media = st.media.get(game_id, {})
+        media = st.media(game_id)
         return {
             "game_id": game_id, "status": g.status.value, "league": g.league,
             "home": {"team_id": g.home_team_id, "name": names["home"], "score": box.score["home"]},

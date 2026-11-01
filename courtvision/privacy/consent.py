@@ -144,6 +144,10 @@ class ConsentManager:
         return self._change(player_id, "player", "child_consent_revoked", "", f, note)
 
     # ---------------------------------------------------------------- Audit
+    def load_audit(self, player_id: str, records: Iterable[ConsentRecord]) -> None:
+        """Gespeicherte Audit-Eintraege eines Spielers wiederherstellen (ersetzt vorhandene)."""
+        self._log = [r for r in self._log if r.player_id != player_id] + list(records)
+
     def audit_trail(self, player_id: Optional[str] = None) -> list[ConsentRecord]:
         return [r for r in self._log if player_id is None or r.player_id == player_id]
 

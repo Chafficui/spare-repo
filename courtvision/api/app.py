@@ -8,6 +8,13 @@ Start::
 Platzhalter ohne echte Authentifizierung, siehe :mod:`courtvision.api.auth`. Vor dem
 Produktivbetrieb durch echtes Auth ersetzen.
 
+**Status-Lebenszyklus eines Spiels:** ``scheduled`` --POST /start--> ``live`` --POST /end--> ``processing``
+--POST /processed--> ``review`` --POST /finalize--> ``final``. Pro Live-Spiel haelt der Server eine
+:class:`courtvision.live.GameSession` (Tafel- und Beobachtungs-Ingest, Perioden-Events); ``/end`` ruft
+``session.finish()``. Die Korrektur-Endpunkte (``/review``, ``/fouls``, ``/scoresheet``, ``/finalize``) arbeiten in
+``processing`` und ``review``; ``final`` ist gesperrt (nur Admin). Kalibrierung, Medien-URLs, Einwilligungs-Audit
+und DSFA-Status liegen als Dokumente im Store (``put_doc``) und ueberleben einen Neustart.
+
 Die statische Web-UI (``courtvision/web``) liegt unter ``/``; alle API-Routen haben Vorrang.
 """
 from __future__ import annotations
@@ -20,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from ..store.eventstore import EventStore
-from . import routes_live, routes_players, routes_review, routes_setup
+from . import routes_demo, routes_live, routes_players, routes_review, routes_setup
 from .state import AppState
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -38,7 +45,7 @@ def create_app(store: Optional[EventStore] = None, *, scoreboard_n_stable: int =
                   description="Rollenbasierte API (X-Role-Header ist ein PLATZHALTER fuer echtes Auth).")
     app.state.cv = state
     app.state.store = store
-    for mod in (routes_setup, routes_live, routes_review, routes_players):
+    for mod in (routes_setup, routes_live, routes_review, routes_players, routes_demo):
         app.include_router(mod.build(state))
 
     @app.get("/health")

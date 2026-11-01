@@ -62,7 +62,7 @@ def build(st: AppState) -> APIRouter:
         side = own_side(p, g)
         events = store.events(game_id)
         namer = Namer(g, st.team_names(g), st.players_map(g), p)
-        video = st.media.get(game_id, {}).get("video_url")
+        video = st.media(game_id).get("video_url")
         items = [it for it in queue(g, threshold) if side is None or it.event.team in (None, side)]
         return {"game_id": game_id, "threshold": threshold, "count": len(items), "video_url": video,
                 "items": [item_json(it, g, namer, events, video) for it in items]}

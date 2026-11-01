@@ -111,6 +111,8 @@ class GameSession:
         self.tracker = PeriodTracker(game.id, game, end_settle_s=end_settle_s)
         self.last_ts = 0.0
         self.finished = False
+        #: Ergebnis des letzten Plausibilitaetsfilter-Laufs (``feed_scoreboard``); fuer die API-Antwort.
+        self.last_filter: Any = None
 
     # ------------------------------------------------------------ Hilfen
     def _append(self, evs: Iterable[Event]) -> list[Event]:
@@ -139,6 +141,12 @@ class GameSession:
                for e in self.engine.set_starters(side, list(ids))]
         return self._append(evs)
 
+    def start(self, video_ts: float = 0.0, clock: Optional[float] = None, period: int = 1) -> list[Event]:
+        """Expliziter Spielstart durch den Bediener (GAME_START/PERIOD_START, idempotent mit dem
+        spaeter aus der Tafel abgeleiteten Start)."""
+        self.last_ts = max(self.last_ts, video_ts)
+        return self._append(self.tracker.start(video_ts, clock, period))
+
     def feed_observation(self, obs: Observation) -> list[Event]:
         self.last_ts = max(self.last_ts, obs_ts(obs))
         out = self._optical(self.engine.feed(obs))
@@ -152,6 +160,7 @@ class GameSession:
         out: list[Event] = []
         if self.filter is not None:
             fo = self.filter.update(r)
+            self.last_filter = fo
             flags = [self._stamp(Event(
                 game_id=self.game.id, type=EventType.FLAG, video_ts=a.video_ts,
                 payload={"kind": f"scoreboard_{a.kind}", "message": a.message, "ref": None,

@@ -199,7 +199,7 @@ def build(st: AppState) -> APIRouter:
     def dpia_update(item_id: str, body: DpiaUpdate, _: Principal = Depends(require())):
         if item_id not in st.dpia.items:
             raise HTTPException(404, "Unbekannter Punkt")
-        st.dpia.set_status(item_id, ItemStatus(body.status), body.owner, body.note)
+        st.set_dpia(item_id, ItemStatus(body.status), body.owner, body.note)
         return dpia_json()
 
     # ---------------------------------------------------------------- Verband

@@ -11,6 +11,9 @@ from courtvision.api.app import create_app
 from courtvision.domain.events import EventStatus, EventType
 from courtvision.domain.models import GameStatus
 from courtvision.geometry.court import LANDMARKS
+from courtvision.domain.observations import ClockState, FrameState, PlayerState, Possession, RimMake, ShotRelease
+from courtvision.domain.serialize import observation_from_dict, observation_to_dict
+from courtvision.sim import demo_setup, load_demo, simulate_game
 from courtvision.store.eventstore import EventStore
 
 THIS_YEAR = date.today().year
@@ -183,7 +186,12 @@ def test_setup_flow(client):
     assert types.count("STARTERS") == 2 and types[0] == "GAME_START"
     assert c.post("/games/g1/start", json={"starters": starters}, headers=HW).status_code == 409
     r = c.post("/games/g1/end", headers=HW)
+    assert r.status_code == 200 and r.json()["game"]["status"] == "processing"
+    # Lebenszyklus: processing -> (system) processed -> review
+    assert c.post("/games/g1/processed", headers=HW).status_code == 403
+    r = c.post("/games/g1/processed", headers=SYS)
     assert r.status_code == 200 and r.json()["game"]["status"] == "review"
+    assert c.post("/games/g1/processed", headers=SYS).status_code == 409
 
 
 # --------------------------------------------------------------- Events
@@ -608,3 +616,215 @@ def test_media_and_livestream_flag(client):
     assert live["livestream"] == {"allowed": True, "url": "https://example.org/stream"}
     ev(c, gid, "TIMEOUT", "home", None, 1, 500, 5)
     assert c.get(f"/games/{gid}/review", headers=KG).json()["video_url"] == "/v.mp4"
+
+
+# ------------------------------------------------- GameSession-Anbindung
+def test_scoreboard_ingest_emits_period_events(client):
+    c = client
+    gid = setup_world(c)
+
+    def post(ts, home, away, clock, period, running):
+        r = c.post(f"/games/{gid}/scoreboard", headers=KG, json={
+            "video_ts": ts, "home": home, "away": away, "clock": clock, "period": period, "running": running})
+        assert r.status_code == 200, r.text
+        return r.json()["events"]
+
+    produced = []
+    for i in range(3):
+        produced += post(10 + i, 0, 0, 600 - i, 1, True)
+    for i in range(3):
+        produced += post(600 + i, 2, 0, 0.0, 1, False)       # Viertelende
+    for i in range(3):
+        produced += post(700 + i, 2, 0, 600 - i, 2, True)    # Viertel 2 laeuft
+    types = [(e["type"], e["period"]) for e in produced if e["type"].startswith("PERIOD")]
+    assert ("PERIOD_END", 1) in types and ("PERIOD_START", 2) in types
+    # Start kam schon vom Bediener (/start): der Tracker erzeugt keinen zweiten GAME_START/PERIOD_START 1
+    all_types = [e["type"] for e in c.get(f"/games/{gid}/events", headers=KG).json()["events"]]
+    assert all_types.count("GAME_START") == 1 and all_types.count("PERIOD_START") == 2
+    # Spielende ueber /end: Session schliesst Periode und Spiel, Status PROCESSING
+    r = c.post(f"/games/{gid}/end", headers=HW)
+    assert r.status_code == 200 and r.json()["game"]["status"] == "processing"
+    assert r.json()["event"]["type"] == "GAME_END"
+    all_types = [e["type"] for e in c.get(f"/games/{gid}/events", headers=KG).json()["events"]]
+    assert all_types.count("GAME_END") == 1 and all_types.count("PERIOD_END") == 2
+    # Korrektur-Endpunkte arbeiten in processing (und review)
+    assert c.get(f"/games/{gid}/review", headers=KG).status_code == 200
+    assert c.post(f"/games/{gid}/fouls", headers=KG, json={"player_id": pid("home", 4)}).status_code == 201
+    assert c.get(f"/games/{gid}/boxscore", headers=ADMIN).json()["score"] == {"home": 2, "away": 0}
+
+
+def test_session_recreated_lazily_after_restart(tmp_path):
+    db = str(tmp_path / "cv.sqlite")
+    with TestClient(create_app(EventStore(db))) as c:
+        gid = setup_world(c)
+    with TestClient(create_app(EventStore(db))) as c:       # Neustart: Session existiert nicht mehr
+        r = c.post(f"/games/{gid}/scoreboard", headers=KG, json={
+            "video_ts": 5, "home": 0, "away": 0, "clock": 590, "period": 1, "running": True})
+        assert r.status_code == 200
+        assert c.post(f"/games/{gid}/end", headers=HW).json()["game"]["status"] == "processing"
+
+
+def test_serialize_round_trip():
+    obs = [
+        FrameState(12.5, (PlayerState(3, "home", 1.5, -2.0, "t-home-4", 0.9), PlayerState(7, None, 0.0, 0.0)),
+                   ball_x=1.0, ball_y=2.0, ball_height=2.5),
+        FrameState(13.0, ()),
+        Possession(1.0, 5, "away", "t-away-3", 0.8), Possession(2.0, None, None),
+        ShotRelease(3.0, 4, "home", 7.0, 1.0, "right", "t-home-7", 0.7, 0.9),
+        RimMake(4.0, "left", 0.6), ClockState(5.0, 2, 431.5, True),
+    ]
+    from courtvision.domain.observations import BallTouch, Formation, OutOfBounds
+    obs += [BallTouch(6.0, 2, "away", None, True, 0.5), OutOfBounds(7.0, 9, "home", "t-home-4", 0.4),
+            Formation(8.0, "free_throw", 3, "home", "t-home-4", "left", 0.95), Formation(9.0, "jump_ball")]
+    import json
+    for o in obs:
+        d = observation_to_dict(o)
+        assert d["kind"] == type(o).__name__
+        assert observation_from_dict(json.loads(json.dumps(d))) == o
+    assert observation_to_dict(obs[0])["players"][0]["player_id"] == "t-home-4"
+    assert observation_to_dict(obs[-1]) == {"kind": "Formation", "video_ts": 9.0, "formation_kind": "jump_ball",
+                                            "shooter_track": None, "shooter_team": None, "shooter_player": None,
+                                            "basket": None, "confidence": 1.0}
+    # ganzzahlige JSON-Zahlen fuer Float-Felder sind erlaubt
+    assert observation_from_dict({"kind": "ClockState", "video_ts": 1, "period": 1, "clock": 600, "running": False}) \
+        == ClockState(1.0, 1, 600.0, False)
+    for bad in ({"kind": "Nope"}, {"kind": "RimMake", "video_ts": 1}, {"kind": "RimMake", "video_ts": 1, "basket": "up"},
+                {"kind": "RimMake", "video_ts": 1, "basket": "left", "x": 1},
+                {"kind": "Possession", "video_ts": 1, "track_id": None, "team": "red"},
+                {"kind": "FrameState", "video_ts": 1, "players": [{"track_id": 1}]}, "x"):
+        with pytest.raises(ValueError):
+            observation_from_dict(bad)
+
+
+def test_observations_endpoint(client):
+    c = client
+    gid = setup_world(c)
+    body = [{"kind": "ClockState", "video_ts": 10 + i, "period": 1, "clock": 600.0 - i, "running": True} for i in range(3)]
+    assert c.post(f"/games/{gid}/observations", json=body, headers=KG).status_code == 403
+    assert c.post(f"/games/{gid}/observations", json=body).status_code == 403
+    r = c.post(f"/games/{gid}/observations", json=body, headers=SYS)
+    assert r.status_code == 200 and r.json()["fed"] == 3
+    # Wurf + Treffer + Tafel -> optisches SHOT-Event
+    shot = [
+        {"kind": "FrameState", "video_ts": 20.0, "players": [
+            {"track_id": 1, "team": "home", "x": 7.0, "y": 0.0, "player_id": pid("home", 7), "id_confidence": 0.9}]},
+        {"kind": "Possession", "video_ts": 20.5, "track_id": 1, "team": "home", "player_id": pid("home", 7)},
+        {"kind": "ShotRelease", "video_ts": 21.0, "track_id": 1, "team": "home", "x": 7.0, "y": 0.0,
+         "basket": "right", "player_id": pid("home", 7), "three_prob": 0.9},
+        {"kind": "RimMake", "video_ts": 22.0, "basket": "right"},
+        {"kind": "ClockState", "video_ts": 30.0, "period": 1, "clock": 570.0, "running": True},
+    ]
+    r = c.post(f"/games/{gid}/observations", json=shot, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    evs = c.get(f"/games/{gid}/events", headers=KG).json()["events"]
+    assert any(e["type"] == "SHOT" and e["source"] == "optical" for e in evs)
+    # Validierung: ganze Liste wird abgelehnt, nichts wird gespeist
+    n = len(evs)
+    bad = c.post(f"/games/{gid}/observations", headers=SYS,
+                 json=[{"kind": "ClockState", "video_ts": 40, "period": 1, "clock": 1, "running": True},
+                       {"kind": "RimMake", "video_ts": 41, "basket": "up"}])
+    assert bad.status_code == 422 and "Beobachtung 1" in bad.json()["detail"]
+    assert len(c.get(f"/games/{gid}/events", headers=KG).json()["events"]) == n
+    assert c.post("/games/zzz/observations", json=[], headers=SYS).status_code == 404
+
+
+def _demo_client(tmp_path=None):
+    store = EventStore(":memory:" if tmp_path is None else str(tmp_path / "demo.sqlite"))
+    setup = load_demo(store, demo_setup())
+    return TestClient(create_app(store)), setup
+
+
+def test_simulate_endpoint_sync_matches_truth():
+    c, setup = _demo_client()
+    with c:
+        gid = setup.game.id
+        body = {"seed": 6, "periods": 1, "period_length_s": 120, "include_frames": False}
+        assert c.post(f"/games/{gid}/simulate", json=body, headers=KG).status_code == 403
+        assert c.post(f"/games/{gid}/simulate", json={"speed": 0}, headers=ADMIN).status_code == 422
+        r = c.post(f"/games/{gid}/simulate", json=body, headers=ADMIN)
+        assert r.status_code == 200, r.text
+        info = r.json()
+        sim = simulate_game(6, setup.game.model_copy(update={"periods": 1, "period_length_s": 120.0}), setup.rosters,
+                            periods=1, period_length_s=120.0, include_frames=False)
+        assert info["mode"] == "sync" and info["final_score"] == sim.final_score
+        assert info["game"]["status"] == "processing"
+        box = c.get(f"/games/{gid}/boxscore", headers=ADMIN).json()
+        assert box["score"] == sim.final_score and not box["score_mismatch"]
+        live = c.get(f"/games/{gid}/live").json()
+        assert live["score"] == sim.final_score and live["status"] == "processing"
+        types = [e["type"] for e in c.get(f"/games/{gid}/events", headers=KG).json()["events"]]
+        for t in ("GAME_START", "PERIOD_START", "PERIOD_END", "GAME_END", "STARTERS", "SCOREBOARD"):
+            assert t in types, t
+        n_truth_fouls = sum(1 for e in sim.truth if e.type == EventType.FOUL)
+        assert n_truth_fouls > 0 and types.count("FOUL") == n_truth_fouls  # Konsolen-Fouls aus der Wahrheit
+        assert c.get(f"/games/{gid}/review", headers=KG).status_code == 200
+        # nur einmal: das Spiel ist nicht mehr geplant
+        assert c.post(f"/games/{gid}/simulate", json=body, headers=ADMIN).status_code == 409
+
+
+def test_simulate_endpoint_replay_in_background():
+    import time
+    c, setup = _demo_client()
+    with c:
+        gid = setup.game.id
+        r = c.post(f"/games/{gid}/simulate", json={"seed": 2, "periods": 1, "period_length_s": 60, "speed": 1000},
+                   headers=ADMIN)
+        assert r.status_code == 200 and r.json()["mode"] == "replay"
+        for _ in range(100):
+            st = c.get(f"/games/{gid}/simulate", headers=ADMIN).json()
+            if not st["running"]:
+                break
+            time.sleep(0.1)
+        assert not st["running"] and not st.get("error")
+        assert c.get(f"/games/{gid}/live").json()["score"] == st["final_score"]
+
+
+# ------------------------------------------------------------ Persistenz
+def test_state_survives_app_recreation(tmp_path):
+    db = str(tmp_path / "cv.sqlite")
+    names = ["corner_top_left", "corner_top_right", "corner_bottom_left", "corner_bottom_right", "center"]
+    clicks = {n: [100.0 + 10 * i, 50.0 + 7 * i * i] for i, n in enumerate(names)}
+    from courtvision.geometry.court import Calibration
+    Hm = Calibration.from_landmarks  # noqa: F841 (Pruefung der Eingabe erfolgt ueber die API)
+    with TestClient(create_app(EventStore(db))) as c:
+        setup_world(c, start=False)
+        # Kalibrierung mit einer realen Homographie (Projektion der Landmarken)
+        H = np.array([[30.0, 4.0, 640.0], [-2.0, 22.0, 360.0], [0.0004, 0.002, 1.0]])
+        clicks = {}
+        for n in names:
+            x, y = LANDMARKS[n]
+            p = H @ [x, y, 1]
+            clicks[n] = [float(p[0] / p[2]), float(p[1] / p[2])]
+        zones = {"substitution": [[-2, 7.5], [2, 7.5], [2, 9], [-2, 9]]}
+        r = c.post("/games/g1/calibration", json={"clicks": clicks, "zones": zones}, headers=HW)
+        assert r.status_code == 200, r.text
+        cal = r.json()
+        assert c.put("/games/g1/media", json={"video_url": "https://x/v.mp4", "stream_url": "https://x/s"},
+                     headers=HW).status_code == 200
+        # Einwilligung aendern -> Audit-Eintrag; DSFA-Punkt abhaken
+        pl = pid("home", 4)
+        r = c.post(f"/players/{pl}/consent", json={"action": "revoke", "level": ["HIGHLIGHTS"], "note": "Wunsch"},
+                   headers=ADMIN)
+        assert r.status_code == 200, r.text
+        audit_before = c.get(f"/players/{pl}/consent", headers=ADMIN).json()["audit"]
+        assert audit_before
+        r = c.post("/privacy/dpia/dpia", json={"status": "done", "owner": "DSB", "note": "abgenommen"}, headers=ADMIN)
+        assert r.status_code == 200
+        assert c.get("/venues").json()[0]["id"] == "v1"
+    with TestClient(create_app(EventStore(db))) as c:       # neue App auf derselben Datei
+        got = c.get("/games/g1/calibration", headers=HW).json()
+        assert got["homography"] == cal["homography"] and got["zones"] == cal["zones"]
+        assert c.post("/games/g1/calibration/zone-check?x=0&y=8", headers=HW).json()["zone"] == "substitution"
+        # Wechselzonen der Kalibrierung kommen in der neuen Session an
+        assert c.app.state.cv.slot("g1").session.engine is not None
+        assert c.get("/games/g1/live").json()["livestream"]["url"] is None  # (nicht erlaubt), aber Medien da:
+        assert c.app.state.cv.media("g1") == {"video_url": "https://x/v.mp4", "stream_url": "https://x/s"}
+        audit_after = c.get(f"/players/{pl}/consent", headers=ADMIN).json()["audit"]
+        assert audit_after == audit_before
+        assert "HIGHLIGHTS" not in c.get(f"/players/{pl}/consent", headers=ADMIN).json()["levels"]
+        items = {i["id"]: i for i in c.get("/privacy/dpia", headers=hdr("verband")).json()["items"]}
+        assert items["dpia"]["status"] == "done" and items["dpia"]["owner"] == "DSB"
+        assert items["signage"]["status"] == "open"
+        # weiterer Eintrag wird an den alten Audit-Trail angehaengt
+        c.post(f"/players/{pl}/consent", json={"action": "grant", "level": ["HIGHLIGHTS"]}, headers=ADMIN)
+        assert len(c.get(f"/players/{pl}/consent", headers=ADMIN).json()["audit"]) == len(audit_before) + 1

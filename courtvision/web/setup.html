@@ -316,7 +316,7 @@
   $('#s-end').addEventListener('click', function () {
     var gid = $('#s-game').value;
     if (!gid || !confirm('Spiel wirklich beenden (Abpfiff)?')) return;
-    CV.tryApi('/games/' + encodeURIComponent(gid) + '/end', { method: 'POST' }).then(function (r) { if (r) { CV.toast('Spiel beendet – Korrekturliste offen'); refreshGames(gid); } });
+    CV.tryApi('/games/' + encodeURIComponent(gid) + '/end', { method: 'POST' }).then(function (r) { if (r) { CV.toast('Spiel beendet – Nachverarbeitung und Korrekturliste'); refreshGames(gid); } });
   });
   $('#m-save').addEventListener('click', function () {
     var gid = $('#s-game').value; if (!gid) return;

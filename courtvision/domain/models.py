@@ -68,8 +68,8 @@ class Team(BaseModel):
 class GameStatus(str, Enum):
     SCHEDULED = "scheduled"
     LIVE = "live"
-    PROCESSING = "processing"  # Abpfiff, Cloud-Nachverarbeitung läuft
-    REVIEW = "review"  # Korrekturliste offen
+    PROCESSING = "processing"  # Abpfiff (session.finish), Cloud-Nachverarbeitung läuft; Korrekturen schon möglich
+    REVIEW = "review"  # Nachverarbeitung fertig, Korrekturliste offen
     FINAL = "final"
 
 

@@ -7,7 +7,7 @@ from typing import Any, Optional
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..domain.events import Event, EventSource, EventStatus, EventType, effective_events
+from ..domain.events import EventType
 from ..domain.models import Game, GameStatus, Team, Venue
 from ..geometry.court import LANDMARKS, Calibration, point_in_polygon
 from .auth import Principal, current_principal, require
@@ -42,8 +42,7 @@ def build(st: AppState) -> APIRouter:
 
     @r.get("/venues")
     def list_venues():
-        rows = store._conn.execute("SELECT data FROM venues").fetchall()  # noqa: SLF001 (kein list_venues im Store)
-        return [Venue.model_validate_json(x[0]).model_dump() for x in rows]
+        return [v.model_dump() for v in store.list_venues()]
 
     # -------------------------------------------------------------- Teams
     @r.post("/teams", status_code=201)
@@ -142,8 +141,7 @@ def build(st: AppState) -> APIRouter:
     @r.put("/games/{game_id}/media")
     def set_media(game_id: str, body: MediaIn, _: Principal = Depends(require(*SETUP))):
         st.game(game_id)
-        st.media.setdefault(game_id, {}).update(body.model_dump(exclude_unset=True))
-        return st.media[game_id]
+        return st.update_media(game_id, body.model_dump(exclude_unset=True))
 
     # ----------------------------------------------------------- Geometrie
     @r.get("/court/geometry")
@@ -182,35 +180,36 @@ def build(st: AppState) -> APIRouter:
             "clicks": {k: list(v) for k, v in body.clicks.items()},
             "image_size": [body.image_width, body.image_height],
         }
-        st.calibrations[game_id] = info
+        st.set_calibration(game_id, info)
         return info
 
     @r.get("/games/{game_id}/calibration")
     def get_calibration(game_id: str, _: Principal = Depends(require("hallenwart", "kampfgericht", "trainer", "system"))):
         st.game(game_id)
-        if game_id not in st.calibrations:
+        info = st.calibration(game_id)
+        if info is None:
             raise HTTPException(404, "Keine Kalibrierung gespeichert")
-        return st.calibrations[game_id]
+        return info
 
     @r.post("/games/{game_id}/calibration/zone-check")
     def zone_check(game_id: str, x: float, y: float, _: Principal = Depends(require("hallenwart", "system"))):
         """Welcher Zone liegt ein Feldpunkt (Meter)? Hilfsfunktion fuer Setup-Tests."""
         st.game(game_id)
-        info = st.calibrations.get(game_id)
+        info = st.calibration(game_id)
         if not info:
             raise HTTPException(404, "Keine Kalibrierung gespeichert")
         zone = next((n for n, poly in info["zones"].items() if point_in_polygon(x, y, [tuple(p) for p in poly])), None)
         return {"zone": zone}
 
     # ---------------------------------------------------------- Start/Ende
-    def _last_clock(game_id: str) -> tuple[int, Optional[float]]:
-        for e in reversed(effective_events(store.events(game_id))):
-            if e.type == EventType.SCOREBOARD and e.payload.get("period"):
-                return int(e.payload["period"]), e.payload.get("clock")
-            if e.period > 0:
-                return e.period, e.clock
-        return 0, None
-
+    # Status-Lebenszyklus eines Spiels:
+    #   scheduled --POST /start--> live --POST /end--> processing --POST /processed--> review --finalize--> final
+    # * start: legt die GameSession an (Aufstellung, ggf. gespeicherte Wechselzonen) und schreibt
+    #   GAME_START/STARTERS/PERIOD_START.
+    # * end: session.finish() -- offene Ereignisse leeren, PERIOD_END/GAME_END, Status PROCESSING
+    #   (Cloud-Nachverarbeitung laeuft).
+    # * processed (system/admin): Nachverarbeitung fertig -> REVIEW. Die Korrekturliste
+    #   (/review, /fouls, /scoresheet) ist in processing UND review bedienbar; /finalize ebenfalls.
     @r.post("/games/{game_id}/start")
     def start_game(game_id: str, body: StartIn, _: Principal = Depends(require(*SETUP))):
         g = st.game(game_id)
@@ -225,29 +224,30 @@ def build(st: AppState) -> APIRouter:
             bad = [i for i in ids if i not in valid]
             if bad:
                 raise HTTPException(400, f"Spieler nicht im Kader von '{side}': {', '.join(bad)}")
-        ts, clock = body.video_ts, g.period_length_s
-        common = dict(game_id=game_id, video_ts=ts, period=1, clock=clock, source=EventSource.CONSOLE,
-                      status=EventStatus.CONFIRMED)
-        out = [store.append(Event(type=EventType.GAME_START, **common))]
-        for side in ("home", "away"):
-            out.append(store.append(Event(type=EventType.STARTERS, team=side, payload={"players": list(body.starters[side])},  # type: ignore[arg-type]
-                                          **common)))
-        out.append(store.append(Event(type=EventType.PERIOD_START, **common)))
-        g = store.set_game_status(game_id, GameStatus.LIVE)
-        return {"game": g.model_dump(mode="json"), "events": [e.model_dump(mode="json") for e in out]}
+        out = st.start_game(g, {s: list(body.starters[s]) for s in ("home", "away")}, body.video_ts)  # type: ignore[index]
+        return {"game": st.game(game_id).model_dump(mode="json"), "events": [e.model_dump(mode="json") for e in out]}
 
     @r.post("/games/{game_id}/end")
     def end_game(game_id: str, body: Optional[EndIn] = None, _: Principal = Depends(require(*SETUP))):
         g = st.game(game_id)
         if g.status != GameStatus.LIVE:
             raise HTTPException(409, f"Nur laufende Spiele können beendet werden (Status '{g.status.value}')")
-        period, _clock = _last_clock(game_id)
-        evs = effective_events(store.events(game_id))
-        ts = body.video_ts if body and body.video_ts is not None else (evs[-1].video_ts if evs else 0.0)
-        ev = store.append(Event(game_id=game_id, type=EventType.GAME_END, video_ts=ts, period=period, clock=0.0,
-                                source=EventSource.CONSOLE, status=EventStatus.CONFIRMED))
-        # Abpfiff: Korrekturliste wird abgearbeitet (die Cloud-Nachverarbeitung hängt sich hier ein)
+        slot = st.slot(game_id)
+        with slot.lock:
+            ts = body.video_ts if body and body.video_ts is not None else slot.session.last_ts
+            out = slot.session.finish(ts)
+        g = st.game(game_id)
+        end_ev = next((e for e in out if e.type == EventType.GAME_END), None)
+        return {"game": g.model_dump(mode="json"), "events": [e.model_dump(mode="json") for e in out],
+                "event": end_ev.model_dump(mode="json") if end_ev else None}
+
+    @r.post("/games/{game_id}/processed")
+    def processed(game_id: str, _: Principal = Depends(require("system"))):
+        """Cloud-Nachverarbeitung abgeschlossen: processing -> review."""
+        g = st.game(game_id)
+        if g.status != GameStatus.PROCESSING:
+            raise HTTPException(409, f"Nur Spiele in 'processing' können übergeben werden (Status '{g.status.value}')")
         g = store.set_game_status(game_id, GameStatus.REVIEW)
-        return {"game": g.model_dump(mode="json"), "event": ev.model_dump(mode="json")}
+        return {"game": g.model_dump(mode="json")}
 
     return r

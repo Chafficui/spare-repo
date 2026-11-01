@@ -56,10 +56,51 @@ def _cmd_benchmark(a: argparse.Namespace) -> int:
     return 0 if res["all_passed"] else 1
 
 
+DEMO_PAGES = (("index.html", "Uebersicht (Rolle waehlen, Demo-Spiel simulieren: Rolle admin)"),
+              ("setup.html", "Setup (Hallenwart)"), ("console.html", "Live-Konsole (Kampfgericht)"),
+              ("dashboard.html", "Trainer-Dashboard"), ("game.html", "Spielseite (Fans)"),
+              ("player.html", "Spielerprofil"), ("verband.html", "Verband / Liga"))
+
+
 def _cmd_serve(a: argparse.Namespace) -> int:
+    import os
+
     import uvicorn  # lazy: nur fuer den Server noetig
 
-    uvicorn.run("courtvision.api.app:app", host=a.host, port=a.port, reload=a.reload)
+    from .store.eventstore import EventStore
+
+    db = a.db or os.environ.get("COURTVISION_DB", ":memory:")
+    if a.reload and db == ":memory:":
+        print("Fehler: --reload braucht --db <Datei> (sonst verwirft jeder Reload den Speicher)", file=sys.stderr)
+        return 2
+    store = EventStore(db)
+    game_id = None
+    if a.demo:
+        from .sim import demo_setup, load_demo
+
+        setup = demo_setup()
+        game_id = setup.game.id
+        if store.get_game(game_id) is None:  # vorhandene Demo-Daten (und Spielstand) nicht ueberschreiben
+            load_demo(store, setup)
+            print(f"Demo-Daten geladen: {setup.home.name} gegen {setup.away.name} ({game_id}), db={db}")
+        else:
+            print(f"Demo-Daten bereits vorhanden ({game_id}), db={db}")
+    base = f"http://{a.host}:{a.port}"
+    print(f"CourtVision laeuft auf {base}")
+    for page, label in DEMO_PAGES:
+        q = f"?game={game_id}" if game_id and page != "index.html" else ""
+        print(f"  {base}/{page}{q}   {label}")
+    print(f"  API-Doku: {base}/docs")
+    if a.demo:
+        print(f"Demo: als admin 'curl -X POST -H \"X-Role: admin\" -H \"Content-Type: application/json\" "
+              f"-d '{{\"seed\":1,\"speed\":20}}' {base}/games/{game_id}/simulate' oder Button auf der Uebersicht.")
+    if a.reload:
+        os.environ["COURTVISION_DB"] = db
+        uvicorn.run("courtvision.api.app:app", host=a.host, port=a.port, reload=True)
+    else:
+        from .api.app import create_app
+
+        uvicorn.run(create_app(store), host=a.host, port=a.port)
     return 0
 
 
@@ -104,6 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--reload", action="store_true")
+    s.add_argument("--db", default=None, help="SQLite-Datei (Default: $COURTVISION_DB oder Speicher)")
+    s.add_argument("--demo", action="store_true", help="Demo-Stammdaten laden (Teams, Kader, Spiel demo-game-1)")
     s.set_defaults(fn=_cmd_serve)
 
     g = sub.add_parser("gst-pipeline", help="GStreamer-Pipeline des Edge-Rechners ausgeben")
