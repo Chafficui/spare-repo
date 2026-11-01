@@ -50,10 +50,16 @@ class SubstitutionZones:
         }
     )
 
+    one_sided: bool = False  # True: Polygone genau wie angegeben, nicht an y=0 gespiegelt
+
     def in_zone(self, x: float, y: float) -> bool:
-        if point_in_polygon(x, y, self.substitution_zone):
-            return True
-        return any(point_in_polygon(x, y, p) for p in self.benches.values())
+        """Zonen gelten (Default) spiegelbildlich: die Bankseite (y>0 oder y<0) ist Aufbau-Sache."""
+        for yy in ((y,) if self.one_sided else (y, -y)):
+            if point_in_polygon(x, yy, self.substitution_zone):
+                return True
+            if any(point_in_polygon(x, yy, p) for p in self.benches.values()):
+                return True
+        return False
 
 
 @dataclass
@@ -115,6 +121,10 @@ class SubstitutionDetector:
         self._pending: list[_Pending] = []
         self._fallbacks: list[tuple[Event, _Pending]] = []
         self._flagged: set[tuple[str, int]] = set()
+        self._vanished: set[int] = set()  # Track aus dem Bild verschwunden (zuletzt im Feld)
+        self._first: dict[int, float] = {}  # erste Sichtung eines Tracks
+        self._seen_now: set[int] = set()  # Tracks im letzten Frame
+        self._left_open: dict[str, set[int]] = {"home": set(), "away": set()}  # Austritte ohne Partner
 
     # ------------------------------------------------------------------ API
     def set_starters(self, side: str, player_ids: Iterable[str]) -> list[Event]:
@@ -195,6 +205,7 @@ class SubstitutionDetector:
             inc = in_court(ps.x, ps.y, self.cfg.court_margin_m)
             if t not in self._court:
                 self._edge_seen[t] = self._near_edge(ps.x, ps.y)
+                self._first[t] = ts
             if t not in self._court or self._court[t][0] != inc:
                 self._court[t] = (inc, ts)
             self._last_pos[t] = (ps.x, ps.y)
@@ -202,13 +213,17 @@ class SubstitutionDetector:
                 self._zone_seen[t] = ts
             if inc:
                 present[ps.team].add(t)
+            self._vanished.discard(t)
+        self._seen_now = seen
         for t, (inc, _) in list(self._court.items()):
             if t not in seen and inc:  # verschwunden -> nicht mehr im Feld
                 self._court[t] = (False, ts)
+                self._vanished.add(t)
         if not self._stopped():
             for side in ("home", "away"):
                 if len(present[side]) == self.cfg.team_size:
                     self._base[side] = set(present[side])
+                    self._left_open[side].clear()
         else:
             for side in ("home", "away"):
                 if not self._base[side] and len(present[side]) == self.cfg.team_size:
@@ -224,55 +239,96 @@ class SubstitutionDetector:
     def _since(self, t: int) -> float:
         return self._court.get(t, (False, 0.0))[1]
 
+    def _born(self, t: int) -> float:
+        return self._first.get(t, self._since(t))
+
     def _evaluate(self, ts: float) -> list[Event]:
         """Wiederanpfiff: offene Wechsel je Team bilden."""
         out: list[Event] = []
         c = self.cfg
         start = (self._stop_start if self._stop_start is not None else ts) - c.stop_grace_s
+
+        def fresh(t: int) -> bool:
+            return self._since(t) >= start and ts - self._since(t) >= c.debounce_s
+
         for side in ("home", "away"):
-            base = self._base[side]
+            base = set(self._base[side])
             present = {t for t, (inc, _) in self._court.items() if inc and self._track_side.get(t) == side}
-            outs = sorted(
-                (
-                    t for t in base
-                    if t not in present
-                    and self._since(t) >= start
-                    and ts - self._since(t) >= c.debounce_s
-                    and self._exit_evidence(t)
-                ),
-                key=self._since,
+            self._left_open[side] -= present
+            outs = [
+                t for t in (base | self._left_open[side])
+                if t not in present
+                and (t in self._left_open[side] or (fresh(t) and self._exit_evidence(t)))
+            ]
+            ins: list[int] = []
+            amb: list[int] = []  # neue Tracks mit ID eines Spielers der Fuenf
+            for t in present:
+                if t in base or not fresh(t):
+                    continue
+                pid = self._track_pid.get(t)
+                if self._entry_evidence(t):
+                    ins.append(t)  # aus Wechselzone/Rand gekommen (auch ein soeben Ausgewechselter kann zurueckkehren)
+                elif pid is not None and pid in self._on[side]:
+                    amb.append(t)
+                # Direkt gelesene ID eines Kadermitglieds schlaegt reine Track-Geometrie
+                elif pid is not None and pid in self._roster_ids(side):
+                    ins.append(t)
+            transient = {t for t in present if t not in base and t not in ins}
+            # Neuer Track eines Spielers der Fuenf: entweder Re-Identifikation (kein Wechsel) oder der
+            # gerade ausgewechselte Spieler, der noch auf dem Weg zur Bank im Feld steht (Schatten).
+            for t_amb in amb:
+                if ins:
+                    continue  # ein echter Zugang erklaert den Austritt -> Schatten, ignorieren
+                pid = self._track_pid[t_amb]
+                same = [o for o in outs if self._track_pid.get(o) == pid]
+                if not same and not any(q != t_amb and self._track_pid.get(q) == pid for q in present):
+                    same = [o for o in outs if o not in self._track_pid]
+                if same:
+                    o = min(same, key=lambda q: abs(self._since(q) - self._born(t_amb)))
+                    outs.remove(o)
+                    base.discard(o)
+                    base.add(t_amb)
+                    self._left_open[side].discard(o)
+                    transient.discard(t_amb)
+            # Paarung nach zeitlicher Naehe von Austritt und Eintritt
+            cand = sorted(
+                ((abs(self._since(o) - self._born(i)), o, i) for o in outs for i in ins),
+                key=lambda x: x[0],
             )
-            ins = sorted(
-                (
-                    t for t in present
-                    if t not in base
-                    and self._since(t) >= start
-                    and ts - self._since(t) >= c.debounce_s
-                    and self._entry_evidence(t)
-                ),
-                key=self._since,
-            )
+            used_o: set[int] = set()
+            used_i: set[int] = set()
             pairs: list[tuple[Optional[int], int]] = []
-            for i, t_in in enumerate(ins):
-                if i < len(outs):
-                    pairs.append((outs[i], t_in))
-                elif len(present) <= c.team_size:
-                    pairs.append((None, t_in))
+            for _, o, i in cand:
+                if o in used_o or i in used_i:
+                    continue
+                used_o.add(o)
+                used_i.add(i)
+                pairs.append((o, i))
+            n_valid = len(present) - len(transient)
+            for i in sorted((x for x in ins if x not in used_i), key=self._born):
+                if n_valid <= c.team_size:
+                    pairs.append((None, i))
+                    used_i.add(i)
+            pairs.sort(key=lambda pr: self._born(pr[1]))
             for t_out, t_in in pairs:
-                p = _Pending(
+                self._pending.append(_Pending(
                     side, t_in, t_out, self._since(t_in),
                     self._clock.period if self._clock else 0,
                     self._clock.clock if self._clock else None,
                     self._run_time,
-                )
-                self._pending.append(p)
-            if pairs:
-                # neue Basislinie, damit der Wechsel nicht doppelt erkannt wird
-                self._base[side] = (base - set(outs)) | set(ins)
+                ))
+                if t_out is not None:
+                    base.discard(t_out)
+                    self._left_open[side].discard(t_out)
+                base.add(t_in)
+            self._left_open[side] |= {o for o in outs if o not in used_o and o in base}
+            self._base[side] = base
         out += self._resolve_pending(ts, final=False)
         return out
 
     def _exit_evidence(self, t: int) -> bool:
+        if t in self._vanished:
+            return True  # Track endete waehrend des Stillstands (Spielerwechsel = neue Track-ID)
         pos = self._last_pos.get(t)
         if pos is None:
             return True
@@ -286,13 +342,24 @@ class SubstitutionDetector:
         return t in self._zone_seen or self._edge_seen.get(t, False)
 
     # -------------------------------------------------------- Identitaet
+    def _bench_pids(self, side: str) -> set[str]:
+        """Spieler mit bekannter ID, die im letzten Frame ausserhalb des Feldes zu sehen sind."""
+        return {
+            self._track_pid[t] for t in self._seen_now
+            if t in self._track_pid and self._track_side.get(t) == side and not self._in_court(t)
+        }
+
     def _candidates_in(self, side: str) -> list[str]:
-        return [i for i in self._roster_ids(side) if i not in self._on[side] and i not in self._disq]
+        bench = self._bench_pids(side)
+        return [
+            i for i in self._roster_ids(side)
+            if i not in self._on[side] and i not in self._disq and i not in bench
+        ]
 
     def _candidates_out(self, side: str, p: _Pending) -> list[str]:
         known = {
-            self._track_pid[t] for t, (inc, _) in self._court.items()
-            if inc and self._track_side.get(t) == side and t in self._track_pid and t != p.in_track
+            self._track_pid[t] for t in self._base[side]
+            if self._in_court(t) and t in self._track_pid and t != p.in_track
         }
         used = {self._track_pid.get(q.out_track) for q in self._pending if q is not p and q.out_track is not None}
         return [i for i in sorted(self._on[side]) if i not in known and i not in used]
@@ -325,10 +392,20 @@ class SubstitutionDetector:
         elim = False
         cand_in = self._candidates_in(side)
         cand_out = self._candidates_out(side, p)
-        if pin is None and len(cand_in) == 1:
+        others_in = {self._track_pid.get(q.in_track) for q in self._pending if q is not p}
+        cand_in = [i for i in cand_in if i not in others_in]
+        open_in = [q for q in self._pending if q.side == side and self._track_pid.get(q.in_track) is None]
+        if pin is None and len(cand_in) == 1 and len(open_in) <= 1:
             pin, elim = cand_in[0], True
-        if pout is None and len(cand_out) == 1:
-            pout, elim = cand_out[0], True
+        if pout is None:
+            if len(cand_out) == 1:
+                pout, elim = cand_out[0], True
+            else:
+                # Bank sichtbar: ein Spieler der Fuenf steht nun ausserhalb des Feldes
+                used = {self._track_pid.get(q.out_track) for q in self._pending if q is not p and q.out_track is not None}
+                off = [i for i in self._bench_pids(side) if i in self._on[side] and i not in used]
+                if len(off) == 1 and len([q for q in self._pending if q.side == side]) == 1:
+                    pout, elim = off[0], True
         return pin, pout, elim, cand_in, cand_out
 
     def _resolve_pending(self, ts: float, final: bool) -> list[Event]:

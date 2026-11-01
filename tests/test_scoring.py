@@ -485,6 +485,127 @@ def test_substitution_detector_standalone_and_free_throw_stoppage():
     assert sub.payload == {"player_in": "h6", "player_out": "h3"}
 
 
+def _bench_frame(ts, court, bench=()):
+    """Home-Frame: court/bench = {track: (x, y, pid)}; Bank an der Seite y<0 (wie im Simulator)."""
+    ps = [PlayerState(t, "home", x, y, pid, 0.9 if pid else 0.0) for t, (x, y, pid) in {**court, **dict(bench)}.items()]
+    return FrameState(ts, tuple(ps))
+
+
+def _court5(ids, off=0):
+    return {10 * off + 1 + i: (-6.0 + 3.0 * i, 1.0 - i % 3, pid) for i, pid in enumerate(ids)}
+
+
+def _stopped_swap_obs(swaps, extra=None):
+    """Uhr steht ab t=5; je (t, out_track, new_track, pid_in): Track weg (mitten im Feld), neuer Track aus der Wechselzone."""
+    court = _court5(["h1", "h2", "h3", "h4", "h5"])
+    obs = [ClockState(0.0, 1, 500.0, True)] + [_bench_frame(float(t), court) for t in range(5)]
+    obs.append(ClockState(5.0, 1, 495.0, False))
+    cur = dict(court)
+    t = 6.0
+    for out_t, new_t, pid_in in swaps:
+        entry = cur.pop(out_t)
+        obs.append(_bench_frame(t, {**cur, new_t: (0.0, -7.9, pid_in)}))
+        cur[new_t] = (entry[0], entry[1], pid_in)
+        obs.append(_bench_frame(t + 0.5, cur))
+        obs.append(_bench_frame(t + 1.0, cur))
+        t += 1.0
+    obs += [_bench_frame(t + 1.0, cur), ClockState(t + 2.0, 1, 495.0, True), _bench_frame(t + 2.5, cur)]
+    return obs
+
+
+def test_substitution_bench_on_negative_y_side_and_track_vanishing_midcourt():
+    eng, _ = start_engine_home_only()
+    evs = feed_all(eng, _stopped_swap_obs([(3, 30, "h7")]))
+    (sub,) = of(evs, T.SUBSTITUTION)
+    assert sub.payload == {"player_in": "h7", "player_out": "h3"} and sub.confidence >= 0.9
+    assert not of(evs, T.FLAG)
+
+
+def test_simultaneous_substitutions_pair_in_and_out_by_time():
+    eng, _ = start_engine_home_only()
+    evs = feed_all(eng, _stopped_swap_obs([(2, 30, "h6"), (4, 31, "h7")]))
+    subs = of(evs, T.SUBSTITUTION)
+    assert [e.payload for e in subs] == [
+        {"player_in": "h6", "player_out": "h2"}, {"player_in": "h7", "player_out": "h4"}]
+    assert all(e.confidence >= 0.9 for e in subs) and not of(evs, T.FLAG)
+    assert eng.on_court("home") == {"h1", "h3", "h5", "h6", "h7"}
+
+
+def test_player_substituted_out_and_back_in_during_same_stoppage():
+    eng, _ = start_engine_home_only()
+    evs = feed_all(eng, _stopped_swap_obs([(2, 30, "h6"), (3, 31, "h2")]))
+    subs = of(evs, T.SUBSTITUTION)
+    assert [e.payload for e in subs] == [
+        {"player_in": "h6", "player_out": "h2"}, {"player_in": "h2", "player_out": "h3"}]
+    assert not of(evs, T.FLAG)
+
+
+def test_new_track_id_for_same_player_is_no_substitution():
+    eng, _ = start_engine_home_only()
+    court = _court5(["h1", "h2", "h3", "h4", "h5"])
+    obs = [ClockState(0.0, 1, 500.0, True)] + [_bench_frame(float(t), court) for t in range(5)]
+    obs.append(ClockState(5.0, 1, 495.0, False))
+    new = dict(court)
+    x, y, _ = new.pop(3)
+    new[40] = (x, y, "h3")  # Re-Identifikation mitten im Feld, gleiche player_id
+    obs += [_bench_frame(6.0, new), _bench_frame(7.0, new), ClockState(8.0, 1, 495.0, True), _bench_frame(9.0, new)]
+    evs = feed_all(eng, obs) + eng.flush()
+    assert not of(evs, T.SUBSTITUTION) and not of(evs, T.FLAG)
+    assert eng.on_court("home") == {"h1", "h2", "h3", "h4", "h5"}
+
+
+def start_engine_home_only():
+    eng = EventEngine("g1", ROSTER)
+    evs = eng.set_starters("home", ["h1", "h2", "h3", "h4", "h5"])
+    return eng, evs
+
+
+def _sim_sub_scores(seed, noise=None, period_length_s=300.0):
+    from courtvision.domain.events import effective_events
+    from courtvision.qa.review import event_f1
+    from courtvision.sim import demo_setup, simulate_game
+
+    d = demo_setup()
+    r = simulate_game(seed, d.game, d.rosters, periods=1, period_length_s=period_length_s,
+                      include_frames=True, noise=noise)
+    eng = EventEngine(d.game.id, d.rosters)
+    evs = []
+    for side in ("home", "away"):
+        st = next(e for e in r.truth if e.type == T.STARTERS and e.team == side)
+        evs += eng.set_starters(side, st.payload["players"])
+    for o in r.observations:
+        evs += eng.feed(o)
+    evs += eng.flush()
+    eff = effective_events(evs)
+    truth = [e for e in r.truth if e.type == T.SUBSTITUTION]
+    assert len(truth) >= 5
+    f1 = event_f1(eff, truth, tol_s=1.5)["SUBSTITUTION"]
+    subs = [e for e in eff if e.type == T.SUBSTITUTION]
+    exact = sum(
+        any(e.team == t.team and abs(e.video_ts - t.video_ts) <= 1.5 and e.payload["player_in"] == t.payload["player_in"]
+            and e.payload["player_out"] == t.payload["player_out"] for e in subs)
+        for t in truth)
+    return f1, subs, truth, exact, [e for e in eff if e.type == T.FLAG and e.payload.get("kind") == "implausible_substitution"]
+
+
+@pytest.mark.parametrize("seed", [1, 6])
+def test_simulated_game_substitutions_recall_precision_clean(seed):
+    f1, subs, truth, exact, flags = _sim_sub_scores(seed)
+    assert f1["recall"] >= 0.95 and f1["precision"] >= 0.95
+    assert exact >= 0.95 * len(truth)
+    assert all(e.confidence >= 0.9 for e in subs)
+    assert not flags
+
+
+def test_simulated_game_substitutions_with_dropped_player_ids():
+    from courtvision.sim import SimNoise
+
+    f1, subs, truth, exact, flags = _sim_sub_scores(1, SimNoise(drop_player_id_prob=0.3))
+    assert f1["recall"] >= 0.9 and f1["precision"] >= 0.9
+    assert exact >= 0.9 * len(truth)
+    assert not flags
+
+
 # ------------------------------------------------------------- general
 def test_all_events_validate_and_share_conventions():
     obs = [ClockState(0, 1, 500.0, True), P(0, 1, "home", "h1"), FREE(1.0), P(1.5, 2, "home", "h2"),
